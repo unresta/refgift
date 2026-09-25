@@ -1,7 +1,7 @@
 """Экраны пользовательской части: текст + клавиатура."""
 from urllib.parse import quote
 
-from aiogram.types import InlineKeyboardButton as Btn, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton as Btn, InlineKeyboardMarkup, WebAppInfo
 from aiosqlite import Row
 
 from bot.callbacks import A, U
@@ -75,6 +75,8 @@ def menu_screen(user: Row, settings: Settings, has_pending_claim: bool, is_admin
                      callback_data=U(a="invite").pack())])
     rows.append([Btn(text="👥 Мои друзья", callback_data=U(a="friends").pack()),
                  Btn(text="🏆 Топ", callback_data=U(a="top").pack())])
+    if settings.webapp_url and settings.flag("roulette_enabled"):
+        rows.append([Btn(text="🎰 Рулетка подарков", web_app=WebAppInfo(url=settings.webapp_url))])
     rows.append([Btn(text="❓ Как это работает", callback_data=U(a="rules").pack())])
     if is_admin:
         rows.append([Btn(text="🛠 Админ-панель", callback_data=A(s="home").pack())])

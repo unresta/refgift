@@ -7,6 +7,10 @@ services:
     env_file: .env
     environment:
       DB_PATH: /app/data/bot.db
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: "8080"
+    ports:
+      - "127.0.0.1:8080:8080"   # для своего nginx/Caddy на хосте; наружу не открыт
     volumes:
       - bot-data:/app/data
     logging:
@@ -15,5 +19,24 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # HTTPS для мини-аппа «Рулетка»: docker compose --profile https up -d
+  # Нужны DOMAIN (домен, указывающий на сервер) и WEBAPP_URL=https://<DOMAIN> в .env, открытые порты 80 и 443.
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["https"]
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - bot
+
 volumes:
   bot-data:
+  caddy-data:
+  caddy-config:

@@ -141,18 +141,22 @@ class RewardService:
         return await self.grant(user)
 
     async def grant(self, user: Row, check_id: int | None = None, origin: str | None = None,
-                    gift_id: str | None = None) -> ClaimResult:
-        """Выдаёт подарок: автоматически за звёзды или заявкой админам (ручной режим / ошибка отправки)."""
+                    gift_id: str | None = None, spin_id: int | None = None, auto: bool | None = None) -> ClaimResult:
+        """Выдаёт подарок: автоматически за звёзды или заявкой админам (ручной режим / ошибка отправки).
+
+        auto=True — всегда пробовать автоотправку (оплаченные прокрутки рулетки), независимо от режима выдачи.
+        """
         user_id = user["user_id"]
         gift_id = gift_id or self.settings.get("gift_id")
         error: str | None = None
-        if self.settings.get("reward_mode") == "auto":
+        if auto or (auto is None and self.settings.get("reward_mode") == "auto"):
             error = await self.send_gift(user_id, gift_id)
             if error is None:
-                await self.db.create_claim(user_id, "sent", "auto", gift_id, check_id=check_id)
+                await self.db.create_claim(user_id, "sent", "auto", gift_id, check_id=check_id, spin_id=spin_id)
                 return ClaimResult.SENT
 
-        claim_id = await self.db.create_claim(user_id, "pending", None, gift_id, error, check_id=check_id)
+        claim_id = await self.db.create_claim(user_id, "pending", None, gift_id, error, check_id=check_id,
+                                              spin_id=spin_id)
         await self._notify_admins_about_claim(claim_id, user, error, origin)
         return ClaimResult.PENDING
 
@@ -206,11 +210,15 @@ class RewardService:
                 await self.db.set_claim_error(claim_id, error)
                 return False, f"Не удалось отправить: {error}"
             await self.db.finish_claim(claim_id, "sent", "auto", admin_id)
+            if claim["spin_id"]:
+                await self.db.set_spin_status(claim["spin_id"], "sent")
             await self.notify_user_reward_sent(user_id)
             return True, "🎁 Подарок отправлен"
 
         if action == "done":
             await self.db.finish_claim(claim_id, "sent", "manual", admin_id)
+            if claim["spin_id"]:
+                await self.db.set_spin_status(claim["spin_id"], "sent")
             await self.notify_user_reward_sent(user_id)
             return True, "✅ Отмечено как выданное"
 

@@ -3,7 +3,11 @@
 Запуск:  .venv/bin/python -m tests.smoke_test
 """
 import asyncio
+import gzip
+import hashlib
+import hmac
 import itertools
+import json
 import logging
 import os
 import sys
@@ -17,7 +21,8 @@ from aiogram.client.session.base import BaseSession
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import (AnswerInlineQuery, CopyMessage, CreateChatInviteLink, EditMessageCaption,
                              GetAvailableGifts, GetChat, GetChatMember, GetChatMemberCount, GetFile, GetMe,
-                             GetMyStarBalance, SendDocument, SendGift, SendInvoice, SendPhoto, TelegramMethod)
+                             GetMyStarBalance, RefundStarPayment, SendDocument, SendGift, SendInvoice, SendPhoto,
+                             TelegramMethod, AnswerPreCheckoutQuery)
 from aiogram.types import ChatFullInfo, ChatInviteLink, File, Gifts, MessageId, StarAmount, User
 
 from bot import middlewares
@@ -42,7 +47,10 @@ class FakeSession(BaseSession):
         pass
 
     async def stream_content(self, url, *a, **kw):
-        """Скачивание файлов: картинка чека (jpg) и превью подарков (webp)."""
+        """Скачивание файлов: стикер подарка (tgs = gzip Lottie), превью (webp), картинки (jpg)."""
+        if url.endswith("/sticker_anim"):
+            yield gzip.compress(b'{"v":"5.5.2","fr":60,"ip":0,"op":60,"w":512,"h":512,"layers":[]}')
+            return
         yield _image("WEBP" if "thumb" in url else "JPEG")
 
     def by_type(self, cls):
@@ -83,8 +91,8 @@ class FakeSession(BaseSession):
             return True
         if isinstance(method, GetAvailableGifts):
             thumb = {"file_id": "thumb", "file_unique_id": "t", "width": 64, "height": 64}
-            sticker = {"file_id": "f", "file_unique_id": "u", "type": "regular", "width": 1, "height": 1,
-                       "is_animated": False, "is_video": False, "thumbnail": thumb}
+            sticker = {"file_id": "sticker_anim", "file_unique_id": "u", "type": "regular", "width": 512,
+                       "height": 512, "is_animated": True, "is_video": False, "thumbnail": thumb}
             return Gifts(gifts=[{"id": "g_bear", "star_count": 15, "sticker": {**sticker, "emoji": "🧸"}},
                                 {"id": "g_rose", "star_count": 25, "sticker": {**sticker, "emoji": "🌹"},
                                  "remaining_count": 10},
@@ -106,6 +114,8 @@ class FakeSession(BaseSession):
             n = next(ids)
             return _msg(method.chat_id, None, from_bot=True, photo=[
                 {"file_id": f"photo{n}", "file_unique_id": f"p{n}", "width": 1280, "height": 720}])
+        if name == "CreateInvoiceLink":
+            return f"https://t.me/$invoice_{method.payload}"
         if isinstance(method, CopyMessage):
             return MessageId(message_id=next(ids))
         if name in ("SendMessage", "EditMessageText", "SendDocument", "SendInvoice"):
@@ -159,6 +169,26 @@ def inline_update(uid: int, query: str) -> dict:
     }}
 
 
+def init_data(uid: int, token: str, auth_date: int | None = None) -> str:
+    """Подписанный initData, как его формирует Telegram для мини-аппа."""
+    from urllib.parse import urlencode
+    fields = {"auth_date": str(auth_date or int(time.time())), "query_id": "AAH",
+              "user": json.dumps({"id": uid, "first_name": f"User{uid}", "username": f"user{uid}"})}
+    check = "\n".join(f"{k}={v}" for k, v in sorted(fields.items()))
+    secret = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
+    fields["hash"] = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+    return urlencode(fields)
+
+
+def payment_update(uid: int, payload: str, amount: int, charge: str) -> dict:
+    return {"update_id": next(ids), "message": {
+        "message_id": next(ids), "date": int(time.time()),
+        "chat": {"id": uid, "type": "private", "first_name": f"User{uid}"},
+        "from": {"id": uid, "is_bot": False, "first_name": f"User{uid}"},
+        "successful_payment": {"currency": "XTR", "total_amount": amount, "invoice_payload": payload,
+                               "telegram_payment_charge_id": charge, "provider_payment_charge_id": ""}}}
+
+
 def cb_update(uid: int, data: str) -> dict:
     return {"update_id": next(ids), "callback_query": {
         "id": str(next(ids)), "chat_instance": "x", "data": data,
@@ -207,7 +237,8 @@ async def main() -> None:
     tmp = tempfile.mkdtemp()
     print("Миграция")
     await check_migration(tmp)
-    config = Config("0:fake", frozenset({ADMIN}), os.path.join(tmp, "t.db"), ZoneInfo("Europe/Moscow"))
+    config = Config("0:fake", frozenset({ADMIN}), os.path.join(tmp, "t.db"), ZoneInfo("Europe/Moscow"),
+                    webapp_url="https://app.test")
     session = FakeSession()
     bot = Bot(f"{BOT_ID}:fake", session=session, default=DefaultBotProperties(parse_mode="HTML"))
     dp, db, admins = await build(config, bot)
@@ -655,6 +686,140 @@ async def scenario(dp, db, bot, session) -> None:
         await feed(cb_update(ADMIN, A(s="rm", a="toggle").pack()))
     finally:
         rem_mod.now = real_now
+
+    print("Рулетка (мини-апп)")
+    from aiohttp.test_utils import TestClient, TestServer
+
+    import bot.web.server as server_mod
+    from bot.web.server import create_app
+    roulette = dp["roulette"]
+    await roulette.seed_defaults()
+    cases = await db.roulette_cases()
+    check([c["name"] for c in cases] == ["Все", "Романтика"] and [c["price"] for c in cases] == [25, 42],
+          "кейсы по умолчанию: «Все» 25 ⭐ и «Романтика» 42 ⭐")
+    all_case = cases[0]
+    check({p["gift_emoji"] for p in await db.roulette_prizes(all_case["id"])} == {"🌹", "🧸"},
+          "призы подобраны из каталога по эмодзи и цене")
+
+    client = TestClient(TestServer(create_app(dp["web"])))
+    await client.start_server()
+    try:
+        def auth(uid):
+            return {"Authorization": f"tma {init_data(uid, bot.token)}"}
+
+        r = await client.post("/api/init", json={})
+        check(r.status == 401, "API без подписи Telegram — 401")
+        r = await client.post("/api/init", json={}, headers={"Authorization": f"tma {init_data(700, 'wrong:token')}"})
+        check(r.status == 401, "поддельная подпись — 401")
+        r = await client.post("/api/init", json={}, headers={
+            "Authorization": f"tma {init_data(700, bot.token, int(time.time()) - 3 * 86400)}"})
+        check(r.status == 401, "устаревшая сессия — 401")
+
+        data = await (await client.post("/api/init", json={}, headers=auth(700))).json()
+        check(len(data["cases"]) == 2 and data["need_sub"] and data["demo"], "init: кейсы, демо, нужна подписка")
+        chances = [p["chance"] for p in data["cases"][0]["prizes"]]
+        check(abs(sum(chances) - 100) < 0.01 and all(p["media"] == "json" for p in data["cases"][0]["prizes"]),
+              "шансы нормализованы до 100%, анимации — Lottie")
+        r = await client.post("/api/spin", json={"case_id": all_case["id"]}, headers=auth(700))
+        check(r.status == 403, "без подписки крутить нельзя")
+
+        session.members.update({(CHANNEL, 700), (-1002, 700)})
+        data = await (await client.post("/api/check_sub", json={}, headers=auth(700))).json()
+        check(data["need_sub"] == [] and (await db.get_user(700))["verified_at"] is not None,
+              "после подписки — можно играть, подписка засчитана")
+
+        demo = await (await client.post("/api/demo", json={"case_id": all_case["id"]}, headers=auth(700))).json()
+        gifts_before = len(session.by_type(SendGift))
+        check(demo["prize"]["emoji"] in ("🌹", "🧸") and len(session.by_type(SendGift)) == gifts_before,
+              "демо-прокрутка без оплаты и без подарка")
+
+        spin = await (await client.post("/api/spin", json={"case_id": all_case["id"]}, headers=auth(700))).json()
+        check(spin["invoice"].endswith(f"spin:{spin['spin_id']}"), "счёт на прокрутку создан")
+        r = await client.post("/api/spin", json={"case_id": all_case["id"]}, headers=auth(700))
+        check(r.status == 429, "частые счета ограничены")
+        payload = f"spin:{spin['spin_id']}"
+
+        async def pre_checkout(uid, amount):
+            await feed({"update_id": next(ids), "pre_checkout_query": {
+                "id": str(next(ids)), "currency": "XTR", "total_amount": amount, "invoice_payload": payload,
+                "from": {"id": uid, "is_bot": False, "first_name": "U"}}})
+            return session.by_type(AnswerPreCheckoutQuery)[-1].ok
+
+        check(await pre_checkout(700, 25) and not await pre_checkout(700, 1) and not await pre_checkout(701, 25),
+              "pre_checkout: верная сумма и владелец — ок, иначе отказ")
+
+        await feed(payment_update(700, payload, 25, "charge_1"))
+        st = await (await client.get(f"/api/spin/{spin['spin_id']}", headers=auth(700))).json()
+        gift = session.by_type(SendGift)[-1]
+        check(st["status"] == "sent" and gift.user_id == 700 and gift.gift_id in ("g_rose", "g_bear")
+              and st["prize"]["gift_id"] == gift.gift_id, f"оплата → выпал и отправлен {st['prize']['emoji']}")
+        check("Рулетка «Все»" in session.texts_to(700)[-1], "в чат пришло сообщение о выигрыше")
+        await feed(payment_update(700, payload, 25, "charge_1"))
+        check(len(session.by_type(SendGift)) == gifts_before + 1, "повторное уведомление об оплате не выдаёт второй приз")
+        r = await client.get(f"/api/spin/{spin['spin_id']}", headers=auth(701))
+        check(r.status == 404, "чужой спин не виден")
+
+        prof = await (await client.get("/api/profile", headers=auth(700))).json()
+        top = await (await client.get("/api/top", headers=auth(700))).json()
+        check(prof["spins"] == 1 and prof["history"][0]["status"] == "sent" and top["recent"][0]["name"] == "User700",
+              "профиль и топ показывают выигрыш")
+
+        r = await client.get(f"/api/gift/{gift.gift_id}")
+        body = await r.json()
+        check(r.status == 200 and body["fr"] == 60, "анимация подарка: .tgs распакован в Lottie JSON")
+        r = await client.get("/")
+        check(r.status == 200 and "Мне повезёт" in await r.text(), "страница мини-аппа отдаётся")
+
+        print("  — выдача не удалась и возврат звёзд")
+        session.gift_error = "BALANCE_TOO_LOW"
+        server_mod._last_invoice.clear()
+        spin2 = await (await client.post("/api/spin", json={"case_id": all_case["id"]}, headers=auth(700))).json()
+        await feed(payment_update(700, f"spin:{spin2['spin_id']}", 25, "charge_2"))
+        session.gift_error = None
+        check((await db.get_spin(spin2["spin_id"]))["status"] == "pending", "нет звёзд у бота — выигрыш в очереди")
+        claim = (await db.list_claims("pending", 10, 0))[0]
+        check(claim["spin_id"] == spin2["spin_id"], "заявка связана с прокруткой")
+        await feed(cb_update(ADMIN, A(s="cl", a="card", id=claim["id"]).pack()))
+        check("Вернуть 25 ⭐" in str(session.screen().reply_markup), "в заявке есть кнопка возврата звёзд")
+        await feed(cb_update(ADMIN, A(s="cl", a="refund_ok", id=claim["id"]).pack()))
+        refund = session.by_type(RefundStarPayment)[-1]
+        check(refund.telegram_payment_charge_id == "charge_2"
+              and (await db.get_spin(spin2["spin_id"]))["status"] == "refunded", "звёзды возвращены")
+
+        print("  — админка рулетки")
+        for cb in (A(s="rl"), A(s="rl", a="case", id=all_case["id"]), A(s="rl", a="add", id=all_case["id"])):
+            await feed(cb_update(ADMIN, cb.pack()))
+        check("RTP" in [t for t in session.texts_to(ADMIN) if "Рулетка подарков" in t][-1], "главный экран рулетки")
+        await feed(cb_update(ADMIN, A(s="rl", a="pick", id=all_case["id"], v="g_rose").pack()))
+        await feed(msg_update(ADMIN, "150"))
+        await feed(msg_update(ADMIN, "0,5%"))
+        prizes = await db.roulette_prizes(all_case["id"])
+        check(len(prizes) == 3 and any(p["weight"] == 0.5 for p in prizes),
+              "приз добавлен с шансом «0,5%» (150 отклонено)")
+        added = next(p for p in prizes if p["weight"] == 0.5)
+        await feed(cb_update(ADMIN, A(s="rl", a="weight", id=added["id"]).pack()))
+        await feed(msg_update(ADMIN, "2"))
+        check((await db.get_roulette_prize(added["id"]))["weight"] == 2, "шанс приза изменён")
+        await feed(cb_update(ADMIN, A(s="rl", a="prize_del", id=added["id"]).pack()))
+        await feed(cb_update(ADMIN, A(s="rl", a="new").pack()))
+        await feed(msg_update(ADMIN, "VIP"))
+        await feed(msg_update(ADMIN, "100"))
+        check(any(c["name"] == "VIP" and c["price"] == 100 for c in await db.roulette_cases()), "новый кейс создан")
+        vip = next(c for c in await db.roulette_cases() if c["name"] == "VIP")
+        data = await (await client.post("/api/init", json={}, headers=auth(700))).json()
+        check(len(data["cases"]) == 2, "кейс без призов не показывается в мини-аппе")
+        await feed(cb_update(ADMIN, A(s="rl", a="del_ok", id=vip["id"]).pack()))
+
+        await feed(cb_update(ADMIN, A(s="rl", a="t", v="roulette_enabled").pack()))
+        r = await client.post("/api/init", json={}, headers=auth(700))
+        check(r.status == 503 and not await pre_checkout(700, 25), "рулетка выключена — мини-апп и оплата закрыты")
+        await feed(cb_update(ADMIN, A(s="rl", a="t", v="roulette_enabled").pack()))
+
+        await feed(cb_update(100, U(a="menu").pack()))
+        check("web_app" in str(session.screen().reply_markup.model_dump(exclude_none=True)),
+              "в меню бота есть кнопка мини-аппа")
+    finally:
+        await client.close()
 
     print("Рассылка")
     await feed(cb_update(ADMIN, A(s="bc").pack()))

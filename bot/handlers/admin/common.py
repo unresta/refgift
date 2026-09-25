@@ -63,6 +63,9 @@ class Input(StatesGroup):
     remind_photo = State()
     remind_text = State()
     topup_amount = State()
+    rl_name = State()
+    rl_price = State()
+    rl_weight = State()
 
 
 def btn(text: str, s: str, a: str = "open", id: int = 0, p: int = 0, v: str = "",

@@ -34,6 +34,7 @@ class GiftCatalog:
     def __init__(self, bot: Bot) -> None:
         self.bot = bot
         self._gifts: list[Gift] = []
+        self._all: dict[str, Gift] = {}  # все когда-либо виденные подарки — для картинок в мини-аппе
         self._loaded_at = 0.0
 
     async def gifts(self) -> list[Gift]:
@@ -43,12 +44,18 @@ class GiftCatalog:
             except TelegramAPIError as e:
                 log.warning("get_available_gifts failed: %s", e)
                 return self._gifts
+            self._all.update({g.id: g for g in raw})
             self._gifts = [g for g in raw if not g.is_premium and g.remaining_count != 0]
             self._loaded_at = time.monotonic()
         return self._gifts
 
     async def get(self, gift_id: str) -> Gift | None:
         return next((g for g in await self.gifts() if g.id == gift_id), None)
+
+    async def any(self, gift_id: str) -> Gift | None:
+        """Подарок по id, даже если он уже распродан (для картинок)."""
+        await self.gifts()
+        return self._all.get(gift_id)
 
 
 def _star(draw: ImageDraw.ImageDraw, cx: float, cy: float, r: float, fill) -> None:

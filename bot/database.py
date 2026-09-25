@@ -134,6 +134,42 @@ CREATE TABLE IF NOT EXISTS reminder_log (
 );
 CREATE INDEX IF NOT EXISTS idx_reminder_log_user ON reminder_log(user_id);
 
+CREATE TABLE IF NOT EXISTS roulette_cases (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT    NOT NULL,
+    price      INTEGER NOT NULL,           -- цена прокрутки в звёздах
+    is_active  INTEGER NOT NULL DEFAULT 1,
+    position   INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS roulette_prizes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id    INTEGER NOT NULL,
+    gift_id    TEXT    NOT NULL,
+    gift_emoji TEXT,
+    gift_price INTEGER NOT NULL,
+    weight     REAL    NOT NULL            -- относительный вес; шанс = вес / сумма весов кейса
+);
+CREATE INDEX IF NOT EXISTS idx_roulette_prizes_case ON roulette_prizes(case_id);
+
+CREATE TABLE IF NOT EXISTS spins (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    case_id    INTEGER NOT NULL,
+    case_name  TEXT,
+    price      INTEGER NOT NULL,
+    status     TEXT    NOT NULL,           -- created | paid | sent | pending | refunded
+    gift_id    TEXT,
+    gift_emoji TEXT,
+    gift_price INTEGER,
+    charge_id  TEXT,                       -- telegram_payment_charge_id (для возврата звёзд)
+    created_at INTEGER NOT NULL,
+    paid_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_spins_user ON spins(user_id, id);
+CREATE INDEX IF NOT EXISTS idx_spins_paid ON spins(paid_at);
+
 CREATE TABLE IF NOT EXISTS check_activations (
     check_id   INTEGER NOT NULL,
     user_id    INTEGER NOT NULL,
@@ -153,6 +189,7 @@ MIGRATIONS = [
     ("checks", "gift_price", "INTEGER"),
     ("users", "remind_step", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "remind_at", "INTEGER"),
+    ("claims", "spin_id", "INTEGER"),
 ]
 POST_MIGRATION_SQL = """
 CREATE INDEX IF NOT EXISTS idx_users_ad_link ON users(ad_link_id, created_at);
@@ -452,13 +489,13 @@ class Database:
     # ---------- claims ----------
     async def create_claim(self, user_id: int, status: str, method: str | None, gift_id: str | None,
                            error: str | None = None, processed_by: int | None = None,
-                           check_id: int | None = None) -> int:
+                           check_id: int | None = None, spin_id: int | None = None) -> int:
         ts = now()
         cur = await self.conn.execute(
             "INSERT INTO claims (user_id, status, method, gift_id, error, created_at, processed_at, processed_by, "
-            "check_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "check_id, spin_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (user_id, status, method, gift_id, error, ts, ts if status != "pending" else None, processed_by,
-             check_id),
+             check_id, spin_id),
         )
         await self.conn.commit()
         return cur.lastrowid or 0
@@ -784,6 +821,109 @@ class Database:
         )}
         reached = await self.val("SELECT COUNT(DISTINCT user_id) FROM reminder_log")
         return {"queued": queued, "sent": sent, "converted": converted, "reached": reached}
+
+    # ---------- рулетка ----------
+    async def roulette_cases(self, only_active: bool = False) -> list[aiosqlite.Row]:
+        where = "WHERE is_active = 1" if only_active else ""
+        return await self.all(f"SELECT * FROM roulette_cases {where} ORDER BY position, id")
+
+    async def get_roulette_case(self, case_id: int) -> aiosqlite.Row | None:
+        return await self.one("SELECT * FROM roulette_cases WHERE id = ?", case_id)
+
+    async def create_roulette_case(self, name: str, price: int) -> int:
+        position = await self.val("SELECT COALESCE(MAX(position), 0) + 1 FROM roulette_cases")
+        cur = await self.conn.execute(
+            "INSERT INTO roulette_cases (name, price, position, created_at) VALUES (?, ?, ?, ?)",
+            (name, price, position, now()),
+        )
+        await self.conn.commit()
+        return cur.lastrowid or 0
+
+    async def update_roulette_case(self, case_id: int, **fields: Any) -> None:
+        assert set(fields) <= {"name", "price", "is_active"}, fields
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        await self.run(f"UPDATE roulette_cases SET {sets} WHERE id = ?", *fields.values(), case_id)
+
+    async def delete_roulette_case(self, case_id: int) -> None:
+        await self.conn.execute("DELETE FROM roulette_prizes WHERE case_id = ?", (case_id,))
+        await self.conn.execute("DELETE FROM roulette_cases WHERE id = ?", (case_id,))
+        await self.conn.commit()
+
+    async def roulette_prizes(self, case_id: int) -> list[aiosqlite.Row]:
+        return await self.all("SELECT * FROM roulette_prizes WHERE case_id = ? ORDER BY gift_price DESC, id",
+                              case_id)
+
+    async def get_roulette_prize(self, prize_id: int) -> aiosqlite.Row | None:
+        return await self.one("SELECT * FROM roulette_prizes WHERE id = ?", prize_id)
+
+    async def add_roulette_prize(self, case_id: int, gift_id: str, emoji: str, price: int, weight: float) -> int:
+        cur = await self.conn.execute(
+            "INSERT INTO roulette_prizes (case_id, gift_id, gift_emoji, gift_price, weight) VALUES (?, ?, ?, ?, ?)",
+            (case_id, gift_id, emoji, price, weight),
+        )
+        await self.conn.commit()
+        return cur.lastrowid or 0
+
+    async def set_prize_weight(self, prize_id: int, weight: float) -> None:
+        await self.run("UPDATE roulette_prizes SET weight = ? WHERE id = ?", weight, prize_id)
+
+    async def delete_roulette_prize(self, prize_id: int) -> None:
+        await self.run("DELETE FROM roulette_prizes WHERE id = ?", prize_id)
+
+    async def create_spin(self, user_id: int, case: aiosqlite.Row) -> int:
+        cur = await self.conn.execute(
+            "INSERT INTO spins (user_id, case_id, case_name, price, status, created_at) "
+            "VALUES (?, ?, ?, ?, 'created', ?)",
+            (user_id, case["id"], case["name"], case["price"], now()),
+        )
+        await self.conn.commit()
+        return cur.lastrowid or 0
+
+    async def get_spin(self, spin_id: int) -> aiosqlite.Row | None:
+        return await self.one("SELECT * FROM spins WHERE id = ?", spin_id)
+
+    async def mark_spin_paid(self, spin_id: int, charge_id: str, prize: aiosqlite.Row) -> bool:
+        """Фиксирует оплату и выпавший приз — только один раз для спина."""
+        return bool(await self.run(
+            "UPDATE spins SET status = 'paid', charge_id = ?, paid_at = ?, gift_id = ?, gift_emoji = ?, "
+            "gift_price = ? WHERE id = ? AND status = 'created'",
+            charge_id, now(), prize["gift_id"], prize["gift_emoji"], prize["gift_price"], spin_id,
+        ))
+
+    async def set_spin_status(self, spin_id: int, status: str) -> None:
+        await self.run("UPDATE spins SET status = ? WHERE id = ?", status, spin_id)
+
+    async def user_spins(self, user_id: int, limit: int = 50) -> list[aiosqlite.Row]:
+        return await self.all(
+            "SELECT * FROM spins WHERE user_id = ? AND paid_at IS NOT NULL ORDER BY id DESC LIMIT ?",
+            user_id, limit,
+        )
+
+    async def recent_wins(self, limit: int = 20) -> list[aiosqlite.Row]:
+        return await self.all(
+            "SELECT s.*, u.full_name FROM spins s LEFT JOIN users u USING(user_id) "
+            "WHERE s.paid_at IS NOT NULL AND s.status != 'refunded' ORDER BY s.id DESC LIMIT ?", limit,
+        )
+
+    async def top_winners(self, since: int, limit: int = 20) -> list[aiosqlite.Row]:
+        return await self.all(
+            "SELECT s.user_id, u.full_name, COUNT(*) AS spins, SUM(s.gift_price) AS won, MAX(s.gift_price) AS best "
+            "FROM spins s LEFT JOIN users u USING(user_id) "
+            "WHERE s.paid_at >= ? AND s.status != 'refunded' GROUP BY s.user_id ORDER BY won DESC LIMIT ?",
+            since, limit,
+        )
+
+    async def roulette_stats(self, since: int = 0) -> list[aiosqlite.Row]:
+        """По кейсам: прокрутки, выручка, стоимость выданных подарков."""
+        return await self.all(
+            "SELECT case_id, case_name, COUNT(*) AS spins, COUNT(DISTINCT user_id) AS players, "
+            "COALESCE(SUM(CASE WHEN status != 'refunded' THEN price END), 0) AS revenue, "
+            "COALESCE(SUM(CASE WHEN status = 'sent' THEN gift_price END), 0) AS paid_out, "
+            "COALESCE(SUM(CASE WHEN status IN ('pending', 'paid') THEN gift_price END), 0) AS owed, "
+            "COALESCE(SUM(status = 'pending'), 0) AS pending, COALESCE(SUM(status = 'refunded'), 0) AS refunded "
+            "FROM spins WHERE paid_at IS NOT NULL AND paid_at >= ? GROUP BY case_id ORDER BY revenue DESC",
+            since,
+        )
 
     # ---------- settings ----------
     async def load_settings(self) -> dict[str, str]:

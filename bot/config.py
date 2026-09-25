@@ -13,6 +13,9 @@ class Config:
     super_admins: frozenset[int]
     db_path: str
     tz: ZoneInfo
+    webapp_url: str = ""       # публичный HTTPS-адрес мини-аппа (без / в конце)
+    web_host: str = "0.0.0.0"
+    web_port: int = 8080
 
 
 def load_config() -> Config:
@@ -30,4 +33,7 @@ def load_config() -> Config:
         super_admins=admins,
         db_path=os.getenv("DB_PATH", "data/bot.db"),
         tz=ZoneInfo(os.getenv("TIMEZONE", "Europe/Moscow")),
+        webapp_url=os.getenv("WEBAPP_URL", "").strip().rstrip("/"),
+        web_host=os.getenv("WEB_HOST", "0.0.0.0"),
+        web_port=int(os.getenv("WEB_PORT", "8080")),
     )

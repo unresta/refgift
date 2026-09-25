@@ -6,6 +6,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandObject, CommandStart
 from aiogram.types import CallbackQuery, ChatJoinRequest, ChatMemberUpdated, Message, PreCheckoutQuery
 from aiogram.types import InlineKeyboardButton as Btn
+from aiogram.types import WebAppInfo
 from aiogram.utils.callback_answer import CallbackAnswer
 from aiosqlite import Row
 
@@ -15,6 +16,7 @@ from bot.services.admins import AdminRegistry
 from bot.services.checks import CHECK_PREFIX, CheckService, CheckStatus
 from bot.services.reminders import ReminderService
 from bot.services.rewards import ClaimResult, RewardService
+from bot.services.roulette import SPIN_PREFIX, RouletteService
 from bot.services.subscription import SubscriptionService
 from bot.settings import Settings
 from bot.utils import esc, render_template, show
@@ -202,9 +204,33 @@ async def on_bot_status(update: ChatMemberUpdated, db: Database, admins: AdminRe
 
 
 @service_router.pre_checkout_query()
-async def on_pre_checkout(query: PreCheckoutQuery) -> None:
-    await query.answer(ok=query.invoice_payload.startswith("topup:"),
-                       error_message="Счёт устарел, запросите новый.")
+async def on_pre_checkout(query: PreCheckoutQuery, roulette: RouletteService) -> None:
+    payload = query.invoice_payload
+    if payload.startswith(SPIN_PREFIX):
+        ok = await roulette.validate_payment(query.from_user.id, payload, query.total_amount)
+    else:
+        ok = payload.startswith("topup:")
+    await query.answer(ok=ok, error_message="Счёт устарел, откройте рулетку и попробуйте ещё раз.")
+
+
+@service_router.message(F.successful_payment, F.successful_payment.invoice_payload.startswith(SPIN_PREFIX))
+async def on_spin_payment(message: Message, roulette: RouletteService, settings: Settings) -> None:
+    """Оплачена прокрутка рулетки: приз разыгрывается и отправляется, мини-апп покажет анимацию."""
+    payment = message.successful_payment
+    spin = await roulette.on_paid(message.from_user.id, payment.invoice_payload, payment.telegram_payment_charge_id)
+    if not spin:
+        return
+    if spin["status"] == "refunded":
+        text = "↩️ Не удалось провести прокрутку — звёзды вернулись на ваш счёт."
+    else:
+        where = ("уже в вашем профиле Telegram 🎉" if spin["status"] == "sent"
+                 else "будет отправлен в ближайшее время — пришлём уведомление.")
+        text = (f"🎰 <b>Рулетка «{esc(spin['case_name'])}»</b>\n\n"
+                f"Выпал {spin['gift_emoji']} за <b>{spin['gift_price']}</b> ⭐ — подарок {where}")
+    markup = None
+    if settings.webapp_url:
+        markup = kb([Btn(text="🎰 Крутить ещё", web_app=WebAppInfo(url=settings.webapp_url))])
+    await message.answer(text, reply_markup=markup)
 
 
 @service_router.message(F.successful_payment)

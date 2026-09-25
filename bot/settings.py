@@ -25,6 +25,11 @@ DEFAULTS: dict[str, str] = {
         "Жми кнопку ниже 👇"
     ),
 
+    "roulette_enabled": "1",
+    "roulette_demo": "1",           # демо-прокрутка без оплаты и без приза
+    "roulette_require_sub": "1",    # играть только после обязательной подписки
+    "roulette_menu_text": "🎰 Рулетка",
+
     "remind_enabled": "1",
     "remind_count": "3",
     "remind_interval": "5",        # минут между напоминаниями (и до первого)
@@ -99,6 +104,7 @@ class Settings:
     def __init__(self, db: Database) -> None:
         self._db = db
         self._values: dict[str, str] = dict(DEFAULTS)
+        self.webapp_url = ""  # из .env (WEBAPP_URL), не хранится в БД
 
     async def load(self) -> None:
         self._values.update(await self._db.load_settings())

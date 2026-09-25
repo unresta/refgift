@@ -10,6 +10,7 @@ from bot.database import Database
 from bot.handlers.admin.common import back, btn, kb, pager, pages_count
 from bot.handlers.admin.home import star_balance, topup_button
 from bot.services.rewards import RewardService
+from bot.services.roulette import RouletteService
 from bot.settings import Settings
 from bot.utils import esc, fmt_dt, show, user_link
 
@@ -71,6 +72,10 @@ async def card_screen(db: Database, config: Config, claim_id: int, back_status: 
     if c["check_id"]:
         check = await db.get_check(c["check_id"])
         lines.append(f"🎟 По чеку: <code>{check['code'] if check else 'удалён'}</code>")
+    spin = await db.get_spin(c["spin_id"]) if c["spin_id"] else None
+    if spin:
+        lines.append(f"🎰 Рулетка «{esc(spin['case_name'])}»: оплачено <b>{spin['price']}</b> ⭐, "
+                     f"выпал {spin['gift_emoji']} {spin['gift_price']} ⭐")
     if c["processed_at"]:
         how = f" · {METHOD.get(c['method'], c['method'])}" if c["method"] else ""
         lines.append(f"🏁 Обработана: {fmt_dt(c['processed_at'], config.tz)}{how}")
@@ -84,6 +89,8 @@ async def card_screen(db: Database, config: Config, claim_id: int, back_status: 
             [btn("✅ Выдал вручную", "cl", "done", id=c["id"]),
              btn("❌ Отклонить", "cl", "reject", id=c["id"], style="danger")],
         ]
+        if spin and spin["charge_id"]:
+            rows.append([btn(f"↩️ Вернуть {spin['price']} ⭐ за прокрутку", "cl", "refund", id=c["id"])])
     rows.append([btn("👤 Профиль пользователя", "us", "card", id=c["user_id"])])
     rows.append(back("cl", v=back_status, text="« К заявкам"))
     return "\n".join(lines), kb(*rows)
@@ -118,6 +125,24 @@ async def cb_reject_confirm(call: CallbackQuery, callback_data: A) -> None:
         [btn("❌ Да, отклонить", "cl", "reject_ok", id=callback_data.id, style="danger")],
         back("cl", "card", "« Отмена", id=callback_data.id),
     ))
+
+
+@router.callback_query(A.filter((F.s == "cl") & (F.a == "refund")))
+async def cb_refund_confirm(call: CallbackQuery, callback_data: A) -> None:
+    await show(call, "↩️ <b>Вернуть звёзды за прокрутку?</b>\n\nПользователь получит свои звёзды обратно, "
+                     "заявка на подарок будет закрыта.", kb(
+        [btn("↩️ Да, вернуть", "cl", "refund_ok", id=callback_data.id, style="danger")],
+        back("cl", "card", "« Отмена", id=callback_data.id),
+    ))
+
+
+@router.callback_query(A.filter((F.s == "cl") & (F.a == "refund_ok")))
+async def cb_refund(call: CallbackQuery, callback_data: A, callback_answer: CallbackAnswer, db: Database,
+                    config: Config, roulette: RouletteService) -> None:
+    ok, msg = await roulette.refund_claim(callback_data.id, call.from_user.id)
+    callback_answer.text = msg[:200]
+    callback_answer.show_alert = not ok
+    await show(call, *await card_screen(db, config, callback_data.id))
 
 
 @router.callback_query(A.filter((F.s == "cl") & (F.a == "all")))

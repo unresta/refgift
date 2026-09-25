@@ -1,0 +1,227 @@
+:root {
+  /* Цвета берутся из темы Telegram; запасные значения — тёмная тема как в клиенте */
+  --page: var(--tg-theme-secondary-bg-color, #1a2230);
+  --card: var(--tg-theme-bg-color, #131a24);
+  --inset: color-mix(in srgb, var(--page) 55%, var(--card));
+  --text: var(--tg-theme-text-color, #f5f7fa);
+  --hint: var(--tg-theme-hint-color, #7d8b99);
+  --accent: var(--tg-theme-accent-text-color, var(--tg-theme-link-color, #5eaef0));
+  --button: var(--tg-theme-button-color, #4178b8);
+  --button-text: var(--tg-theme-button-text-color, #ffffff);
+  --separator: color-mix(in srgb, var(--hint) 22%, transparent);
+  --gold: #e9a23b;
+  --gold-bg: color-mix(in srgb, #f2a31b 16%, transparent);
+  --radius: 20px;
+  --item: min(38vw, 150px);
+  --gap: 12px;
+  --safe-bottom: max(env(safe-area-inset-bottom), var(--tg-safe-area-inset-bottom, 0px));
+  --safe-top: var(--tg-content-safe-area-inset-top, 0px);
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; background: var(--page); color: var(--text); }
+body {
+  font: 16px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+  user-select: none;
+}
+button { font: inherit; color: inherit; border: 0; background: none; padding: 0; cursor: pointer; }
+h1, h2 { margin: 0; }
+
+#app { padding: calc(12px + var(--safe-top)) 12px calc(96px + var(--safe-bottom)); max-width: 560px; margin: 0 auto; }
+.screen { display: none; animation: fade-in .25s ease; }
+.screen.active { display: block; }
+@keyframes fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+.card { background: var(--card); border-radius: var(--radius); }
+.title { font-size: 28px; font-weight: 700; margin: 4px 4px 14px; }
+.star { width: 1em; height: 1em; vertical-align: -0.14em; }
+
+/* ---------- сегменты (кейсы) ---------- */
+.segmented {
+  display: flex; gap: 4px; padding: 4px; margin-bottom: 12px;
+  background: var(--card); border-radius: 18px;
+}
+.seg {
+  flex: 1; height: 42px; border-radius: 14px; color: var(--hint); font-weight: 500;
+  display: flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap;
+  transition: background .2s, color .2s;
+}
+.seg.active { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
+.seg:disabled { opacity: .5; }
+
+/* ---------- рулетка ---------- */
+.roulette-card { padding: 12px; }
+.list-row .name .star, .list-row .sub .star { width: .95em; height: .95em; }
+.roulette {
+  position: relative; overflow: hidden; border-radius: 16px; background: var(--card);
+  height: calc(var(--item) * 1.3 + 24px); contain: strict;
+}
+.strip {
+  position: absolute; left: 0; top: 12px; display: flex; gap: var(--gap);
+  will-change: transform;
+}
+.item {
+  flex: 0 0 var(--item); height: calc(var(--item) * 1.3); border-radius: 16px;
+  background: var(--inset); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+}
+.item .gift { width: 64%; aspect-ratio: 1; }
+.item.win { animation: win-pulse 1.2s ease 2; }
+@keyframes win-pulse { 50% { transform: scale(1.06); box-shadow: 0 0 0 2px var(--gold); } }
+
+.gift { display: block; object-fit: contain; pointer-events: none; }
+.gift.emoji { display: flex; align-items: center; justify-content: center; font-size: 56px; line-height: 1; }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 5px; padding: 5px 12px; border-radius: 999px;
+  background: var(--gold-bg); color: var(--gold); font-weight: 600; font-size: 15px;
+}
+.pill .star { width: 16px; height: 16px; }
+
+.marker { position: absolute; inset: 0; pointer-events: none; }
+.marker .line { position: absolute; left: 50%; top: 0; bottom: 0; width: 1.5px; margin-left: -.75px;
+  background: color-mix(in srgb, var(--accent) 55%, transparent); }
+.marker .tri { position: absolute; left: 50%; width: 0; height: 0; margin-left: -9px;
+  border-left: 9px solid transparent; border-right: 9px solid transparent; }
+.marker .tri.top { top: 0; border-top: 10px solid color-mix(in srgb, var(--accent) 60%, var(--card)); }
+.marker .tri.bottom { bottom: 0; border-bottom: 10px solid color-mix(in srgb, var(--accent) 60%, var(--card)); }
+.fade { position: absolute; top: 0; bottom: 0; width: 44px; pointer-events: none; }
+.fade.left { left: 0; background: linear-gradient(90deg, var(--card), transparent); }
+.fade.right { right: 0; background: linear-gradient(270deg, var(--card), transparent); }
+
+.row { display: flex; align-items: center; justify-content: space-between; padding: 14px 6px 4px; }
+.switch-row span { font-size: 17px; }
+.switch {
+  appearance: none; width: 51px; height: 31px; border-radius: 16px; position: relative; cursor: pointer;
+  background: color-mix(in srgb, var(--hint) 35%, transparent); transition: background .2s; margin: 0;
+}
+.switch::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 27px; height: 27px; border-radius: 50%;
+  background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.25); transition: transform .25s cubic-bezier(.3,1.4,.6,1);
+}
+.switch:checked { background: #34c759; }
+.switch:checked::after { transform: translateX(20px); }
+
+/* ---------- кнопка ---------- */
+.big-button {
+  position: relative; width: 100%; height: 58px; margin: 14px 0 22px; border-radius: 29px;
+  background: var(--button); color: var(--button-text); font-size: 17px; font-weight: 600;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  transition: transform .12s, opacity .2s;
+}
+.big-button:active { transform: scale(.98); }
+.big-button .price { display: inline-flex; align-items: center; gap: 4px; }
+.big-button .spinner { display: none; }
+.big-button.busy .label, .big-button.busy .price { opacity: 0; }
+.big-button.busy .spinner {
+  display: block; position: absolute; width: 22px; height: 22px; border-radius: 50%;
+  border: 2.5px solid color-mix(in srgb, var(--button-text) 35%, transparent); border-top-color: var(--button-text);
+  animation: spin .8s linear infinite;
+}
+.big-button:disabled { opacity: .55; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- призы ---------- */
+.section-head { display: flex; align-items: baseline; justify-content: space-between; margin: 0 6px 10px; }
+.section-head h2 { font-size: 24px; font-weight: 600; }
+.link { color: var(--accent); font-size: 22px; font-weight: 600; }
+.prizes-card { padding: 10px; }
+.prizes { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; scroll-snap-type: x mandatory; }
+.prizes::-webkit-scrollbar { display: none; }
+.prize { flex: 0 0 106px; scroll-snap-align: start; background: var(--inset); border-radius: 14px; padding-top: 8px;
+  text-align: center; }
+.prize .chance { font-size: 15px; font-weight: 500; margin-bottom: 8px; white-space: nowrap; }
+.prize .box { background: var(--card); border-radius: 12px; margin: 0 3px 3px; padding: 12px 0 10px;
+  display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.prize .gift { width: 58px; height: 58px; }
+.prize .gift.emoji { font-size: 44px; }
+.prize .pill { font-size: 14px; padding: 4px 10px; }
+
+/* ---------- списки ---------- */
+.list { padding: 4px 0; overflow: hidden; }
+.list-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; position: relative; }
+.list-row + .list-row::before { content: ""; position: absolute; top: 0; left: 66px; right: 0; height: .5px;
+  background: var(--separator); }
+.list-row .gift { width: 40px; height: 40px; flex: none; }
+.list-row .gift.emoji { font-size: 30px; }
+.list-row .body { flex: 1; min-width: 0; }
+.list-row .name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.list-row .sub { color: var(--hint); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rank { width: 40px; text-align: center; font-weight: 600; color: var(--hint); flex: none; font-size: 17px; }
+.rank.medal { font-size: 26px; }
+.list-row.me { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.chip { font-size: 13px; padding: 3px 8px; border-radius: 8px; font-weight: 500; white-space: nowrap; }
+.chip.sent { color: #34c759; background: color-mix(in srgb, #34c759 14%, transparent); }
+.chip.pending { color: var(--gold); background: var(--gold-bg); }
+.chip.refunded { color: var(--hint); background: color-mix(in srgb, var(--hint) 14%, transparent); }
+.empty { text-align: center; padding: 36px 20px; color: var(--hint); }
+.empty .big { font-size: 48px; margin-bottom: 8px; }
+.empty button { margin-top: 14px; color: var(--accent); font-weight: 600; }
+
+/* ---------- профиль ---------- */
+.profile-head { display: flex; flex-direction: column; align-items: center; gap: 10px; margin: 8px 0 18px; }
+.avatar { width: 88px; height: 88px; border-radius: 50%; background: linear-gradient(135deg, #72d5fd, #2a9ef1);
+  display: flex; align-items: center; justify-content: center; font-size: 34px; font-weight: 600; color: #fff;
+  background-size: cover; background-position: center; }
+.profile-name { font-size: 22px; font-weight: 600; }
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 22px; }
+.stat { background: var(--card); border-radius: 16px; padding: 12px 8px; text-align: center; }
+.stat b { display: flex; align-items: center; justify-content: center; gap: 4px; font-size: 20px; }
+.stat span { color: var(--hint); font-size: 13px; }
+
+/* ---------- таббар ---------- */
+.tabbar {
+  position: fixed; left: 50%; bottom: calc(10px + var(--safe-bottom)); transform: translateX(-50%);
+  display: flex; gap: 4px; padding: 6px; border-radius: 30px; z-index: 10;
+  background: color-mix(in srgb, var(--card) 88%, transparent);
+  backdrop-filter: blur(18px) saturate(1.4); -webkit-backdrop-filter: blur(18px) saturate(1.4);
+  box-shadow: 0 6px 24px rgba(0,0,0,.18), inset 0 0 0 .5px var(--separator);
+}
+.tab { width: 88px; height: 56px; border-radius: 24px; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 2px; font-size: 12px; font-weight: 500; color: var(--text); transition: background .2s, color .2s; }
+.tab svg { width: 26px; height: 26px; }
+.tab.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+
+/* ---------- шторка ---------- */
+.sheet-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); opacity: 0; pointer-events: none;
+  transition: opacity .25s; z-index: 20; }
+.sheet-backdrop.open { opacity: 1; pointer-events: auto; }
+.sheet {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 21; max-width: 560px; margin: 0 auto;
+  background: var(--card); border-radius: 24px 24px 0 0; padding: 10px 20px calc(20px + var(--safe-bottom));
+  transform: translateY(105%); transition: transform .38s cubic-bezier(.2,.9,.25,1); text-align: center;
+}
+.sheet.open { transform: none; }
+.sheet::before { content: ""; display: block; width: 36px; height: 5px; border-radius: 3px; margin: 0 auto 8px;
+  background: color-mix(in srgb, var(--hint) 45%, transparent); }
+.sheet .win-gift { width: 168px; height: 168px; margin: 4px auto 6px; }
+.sheet .win-gift .gift.emoji, .sheet .gift.emoji.win-gift { font-size: 120px; width: 168px; height: 168px; }
+.sheet h3 { font-size: 24px; margin: 4px 0 6px; }
+.sheet p { color: var(--hint); margin: 0 0 18px; }
+.sheet .pill { margin-bottom: 14px; font-size: 17px; }
+.sheet .big-button { margin: 0 0 8px; }
+.sheet .secondary { width: 100%; height: 50px; border-radius: 25px; color: var(--accent); font-weight: 600; font-size: 17px; }
+.channel { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px;
+  background: var(--inset); border-radius: 14px; margin-bottom: 8px; text-align: left; }
+.channel .name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.channel button { color: var(--button-text); background: var(--button); border-radius: 16px; padding: 7px 14px;
+  font-weight: 600; font-size: 15px; flex: none; }
+
+/* конфетти */
+.confetti { position: fixed; inset: 0; pointer-events: none; z-index: 22; overflow: hidden; }
+.confetti i { position: absolute; top: -12px; width: 8px; height: 12px; border-radius: 2px; opacity: .95;
+  animation: fall linear forwards; }
+@keyframes fall { to { transform: translate3d(var(--dx), 110vh, 0) rotate(var(--rot)); } }
+
+/* загрузка */
+.boot { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--page);
+  z-index: 30; transition: opacity .3s; }
+.boot.hidden { opacity: 0; pointer-events: none; }
+.boot-spinner { width: 34px; height: 34px; border-radius: 50%; border: 3px solid var(--separator);
+  border-top-color: var(--accent); animation: spin .8s linear infinite; }
+.boot .error { max-width: 280px; text-align: center; color: var(--hint); }
+
+@media (prefers-reduced-motion: reduce) {
+  .screen, .sheet, .switch::after { animation: none; transition: none; }
+}
