@@ -23,7 +23,9 @@ CREATE TABLE IF NOT EXISTS users (
     created_at      INTEGER NOT NULL,
     verified_at     INTEGER,                     -- когда впервые прошёл обязательную подписку
     last_seen       INTEGER NOT NULL,
-    ad_link_id      INTEGER                      -- рекламная ссылка, по которой пришёл
+    ad_link_id      INTEGER,                     -- рекламная ссылка, по которой пришёл
+    source_check_id INTEGER,                     -- чек, по которому впервые запустил бота
+    pending_check   TEXT                         -- код чека, ждущего активации после подписки
 );
 CREATE INDEX IF NOT EXISTS idx_users_referrer ON users(referrer_id);
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username COLLATE NOCASE);
@@ -56,7 +58,8 @@ CREATE TABLE IF NOT EXISTS claims (
     error        TEXT,
     created_at   INTEGER NOT NULL,
     processed_at INTEGER,
-    processed_by INTEGER
+    processed_by INTEGER,
+    check_id     INTEGER            -- заявка создана активацией чека
 );
 CREATE INDEX IF NOT EXISTS idx_claims_status ON claims(status, id);
 CREATE INDEX IF NOT EXISTS idx_claims_user   ON claims(user_id);
@@ -89,13 +92,53 @@ CREATE TABLE IF NOT EXISTS ad_clicks (
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ad_clicks_link ON ad_clicks(link_id, created_at);
+
+CREATE TABLE IF NOT EXISTS checks (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    code              TEXT    NOT NULL UNIQUE,
+    total             INTEGER NOT NULL,          -- сколько всего активаций
+    caption           TEXT,                      -- своя подпись (NULL — шаблон из текстов)
+    gift_id           TEXT,                      -- подарок чека (NULL — из настроек)
+    gift_emoji        TEXT,
+    gift_price        INTEGER,
+    with_photo        INTEGER NOT NULL DEFAULT 0,
+    is_active         INTEGER NOT NULL DEFAULT 1,
+    is_sent           INTEGER NOT NULL DEFAULT 0, -- админ отправил чек (chosen_inline_result)
+    inline_message_id TEXT,
+    created_by        INTEGER NOT NULL,
+    created_at        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_checks_draft ON checks(created_by, is_sent, created_at);
+
+CREATE TABLE IF NOT EXISTS gift_images (
+    base_file_id TEXT NOT NULL,   -- картинка чека
+    gift_id      TEXT NOT NULL,
+    file_id      TEXT NOT NULL,   -- картинка чека со значком подарка
+    PRIMARY KEY (base_file_id, gift_id)
+);
+
+CREATE TABLE IF NOT EXISTS check_activations (
+    check_id   INTEGER NOT NULL,
+    user_id    INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (check_id, user_id)
+);
 """
 
 # Колонки, добавленные после первого релиза: (таблица, колонка, определение)
 MIGRATIONS = [
     ("users", "ad_link_id", "INTEGER"),
+    ("users", "source_check_id", "INTEGER"),
+    ("users", "pending_check", "TEXT"),
+    ("claims", "check_id", "INTEGER"),
+    ("checks", "gift_id", "TEXT"),
+    ("checks", "gift_emoji", "TEXT"),
+    ("checks", "gift_price", "INTEGER"),
 ]
-POST_MIGRATION_SQL = "CREATE INDEX IF NOT EXISTS idx_users_ad_link ON users(ad_link_id, created_at);"
+POST_MIGRATION_SQL = """
+CREATE INDEX IF NOT EXISTS idx_users_ad_link ON users(ad_link_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_users_check ON users(source_check_id);
+"""
 
 TOTAL = "(ref_count + bonus_refs)"
 
@@ -387,12 +430,14 @@ class Database:
 
     # ---------- claims ----------
     async def create_claim(self, user_id: int, status: str, method: str | None, gift_id: str | None,
-                           error: str | None = None, processed_by: int | None = None) -> int:
+                           error: str | None = None, processed_by: int | None = None,
+                           check_id: int | None = None) -> int:
         ts = now()
         cur = await self.conn.execute(
-            "INSERT INTO claims (user_id, status, method, gift_id, error, created_at, processed_at, processed_by) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (user_id, status, method, gift_id, error, ts, ts if status != "pending" else None, processed_by),
+            "INSERT INTO claims (user_id, status, method, gift_id, error, created_at, processed_at, processed_by, "
+            "check_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, status, method, gift_id, error, ts, ts if status != "pending" else None, processed_by,
+             check_id),
         )
         await self.conn.commit()
         return cur.lastrowid or 0
@@ -540,6 +585,128 @@ class Database:
         clicks = await self.all("SELECT created_at FROM ad_clicks WHERE link_id = ? AND created_at >= ?",
                                 link_id, since)
         return [r[0] for r in new], [r[0] for r in clicks]
+
+    # ---------- чеки ----------
+    async def create_check(self, code: str, total: int, caption: str | None, with_photo: bool,
+                           created_by: int, gift_id: str, gift_emoji: str, gift_price: int) -> int:
+        cur = await self.conn.execute(
+            "INSERT INTO checks (code, total, caption, with_photo, created_by, created_at, gift_id, gift_emoji, "
+            "gift_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (code, total, caption, int(with_photo), created_by, now(), gift_id, gift_emoji, gift_price),
+        )
+        await self.conn.commit()
+        return cur.lastrowid or 0
+
+    async def find_draft_check(self, created_by: int, total: int, caption: str | None, with_photo: bool,
+                               gift_id: str, max_age: int = 600) -> aiosqlite.Row | None:
+        """Неотправленный чек с теми же параметрами — чтобы не плодить черновики на каждое нажатие клавиши."""
+        return await self.one(
+            "SELECT * FROM checks WHERE created_by = ? AND is_sent = 0 AND total = ? AND caption IS ? "
+            "AND with_photo = ? AND gift_id = ? AND created_at >= ? "
+            "AND NOT EXISTS (SELECT 1 FROM check_activations a WHERE a.check_id = checks.id) "
+            "ORDER BY id DESC LIMIT 1",
+            created_by, total, caption, int(with_photo), gift_id, now() - max_age,
+        )
+
+    async def cleanup_check_drafts(self, max_age: int = 86400) -> int:
+        """Удаляет старые неотправленные черновики — только если отметка «отправлен» точно работает
+        (в @BotFather включён /setinlinefeedback и хотя бы один чек уже отмечен отправленным)."""
+        return await self.run(
+            "DELETE FROM checks WHERE is_sent = 0 AND created_at < ? "
+            "AND NOT EXISTS (SELECT 1 FROM check_activations a WHERE a.check_id = checks.id) "
+            "AND EXISTS (SELECT 1 FROM checks s WHERE s.is_sent = 1)",
+            now() - max_age,
+        )
+
+    async def get_check(self, check_id: int) -> aiosqlite.Row | None:
+        return await self.one(
+            "SELECT c.*, (SELECT COUNT(*) FROM check_activations a WHERE a.check_id = c.id) AS used "
+            "FROM checks c WHERE c.id = ?", check_id,
+        )
+
+    async def get_check_by_code(self, code: str) -> aiosqlite.Row | None:
+        return await self.one(
+            "SELECT c.*, (SELECT COUNT(*) FROM check_activations a WHERE a.check_id = c.id) AS used "
+            "FROM checks c WHERE c.code = ?", code,
+        )
+
+    VISIBLE_CHECKS = "(c.is_sent = 1 OR EXISTS (SELECT 1 FROM check_activations a WHERE a.check_id = c.id))"
+
+    async def list_checks(self, limit: int, offset: int) -> list[aiosqlite.Row]:
+        return await self.all(
+            "SELECT c.*, (SELECT COUNT(*) FROM check_activations a WHERE a.check_id = c.id) AS used "
+            f"FROM checks c WHERE {self.VISIBLE_CHECKS} ORDER BY c.id DESC LIMIT ? OFFSET ?",
+            limit, offset,
+        )
+
+    async def count_checks(self) -> int:
+        return await self.val(f"SELECT COUNT(*) FROM checks c WHERE {self.VISIBLE_CHECKS}")
+
+    async def mark_check_sent(self, check_id: int, inline_message_id: str | None) -> None:
+        await self.run(
+            "UPDATE checks SET is_sent = 1, inline_message_id = COALESCE(?, inline_message_id) WHERE id = ?",
+            inline_message_id, check_id,
+        )
+
+    async def set_check_active(self, check_id: int, active: bool) -> None:
+        await self.run("UPDATE checks SET is_active = ? WHERE id = ?", int(active), check_id)
+
+    async def delete_check(self, check_id: int) -> None:
+        await self.conn.execute("DELETE FROM check_activations WHERE check_id = ?", (check_id,))
+        await self.conn.execute("UPDATE users SET source_check_id = NULL WHERE source_check_id = ?", (check_id,))
+        await self.conn.execute("DELETE FROM checks WHERE id = ?", (check_id,))
+        await self.conn.commit()
+
+    async def try_activate_check(self, check_id: int, user_id: int) -> bool:
+        """Одним атомарным запросом: чек активен, лимит не исчерпан, пользователь ещё не активировал."""
+        return bool(await self.run(
+            "INSERT OR IGNORE INTO check_activations (check_id, user_id, created_at) "
+            "SELECT ?, ?, ? FROM checks c WHERE c.id = ? AND c.is_active = 1 "
+            "AND (SELECT COUNT(*) FROM check_activations a WHERE a.check_id = c.id) < c.total",
+            check_id, user_id, now(), check_id,
+        ))
+
+    async def has_activated(self, check_id: int, user_id: int) -> bool:
+        return bool(await self.val(
+            "SELECT 1 FROM check_activations WHERE check_id = ? AND user_id = ?", check_id, user_id
+        ))
+
+    async def check_activations(self, check_id: int, limit: int, offset: int) -> list[aiosqlite.Row]:
+        return await self.all(
+            "SELECT a.*, u.full_name, u.username, "
+            "  (SELECT status FROM claims cl WHERE cl.check_id = a.check_id AND cl.user_id = a.user_id "
+            "   ORDER BY cl.id DESC LIMIT 1) AS gift_status "
+            "FROM check_activations a LEFT JOIN users u USING(user_id) "
+            "WHERE a.check_id = ? ORDER BY a.created_at DESC LIMIT ? OFFSET ?",
+            check_id, limit, offset,
+        )
+
+    async def check_stats(self, check_id: int) -> dict[str, int]:
+        gifts = await self.one(
+            "SELECT COALESCE(SUM(status = 'sent'), 0) AS sent, COALESCE(SUM(status = 'pending'), 0) AS pending, "
+            "COALESCE(SUM(status = 'rejected'), 0) AS rejected FROM claims WHERE check_id = ?", check_id,
+        )
+        times = await self.one(
+            "SELECT MIN(created_at) AS first_at, MAX(created_at) AS last_at FROM check_activations WHERE check_id = ?",
+            check_id,
+        )
+        new_users = await self.val("SELECT COUNT(*) FROM users WHERE source_check_id = ?", check_id)
+        return {**dict(gifts or {}), **dict(times or {}), "new_users": new_users}
+
+    async def get_gift_image(self, base_file_id: str, gift_id: str) -> str | None:
+        return await self.val("SELECT file_id FROM gift_images WHERE base_file_id = ? AND gift_id = ?",
+                              base_file_id, gift_id, default=None)
+
+    async def save_gift_image(self, base_file_id: str, gift_id: str, file_id: str) -> None:
+        await self.run("INSERT OR REPLACE INTO gift_images (base_file_id, gift_id, file_id) VALUES (?, ?, ?)",
+                       base_file_id, gift_id, file_id)
+
+    async def set_pending_check(self, user_id: int, code: str | None) -> None:
+        await self.run("UPDATE users SET pending_check = ? WHERE user_id = ?", code, user_id)
+
+    async def set_source_check(self, user_id: int, check_id: int) -> None:
+        await self.run("UPDATE users SET source_check_id = ? WHERE user_id = ? AND source_check_id IS NULL",
+                       check_id, user_id)
 
     # ---------- settings ----------
     async def load_settings(self) -> dict[str, str]:

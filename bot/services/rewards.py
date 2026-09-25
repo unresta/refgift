@@ -120,11 +120,11 @@ class RewardService:
             log.debug("Не удалось уведомить реферера %s: %s", referrer_id, e)
 
     # ---------- награды ----------
-    async def send_gift(self, user_id: int) -> str | None:
+    async def send_gift(self, user_id: int, gift_id: str | None = None) -> str | None:
         """Отправляет подарок Telegram за звёзды бота. Возвращает текст ошибки или None."""
         try:
             await self.bot.send_gift(
-                gift_id=self.settings.get("gift_id"),
+                gift_id=gift_id or self.settings.get("gift_id"),
                 user_id=user_id,
                 text=self.settings.get("gift_text") or None,
             )
@@ -138,22 +138,29 @@ class RewardService:
         if not await self.db.try_consume_reward(user_id, allowed_rewards(user, self.settings)):
             return ClaimResult.UNAVAILABLE
 
-        gift_id = self.settings.get("gift_id")
+        return await self.grant(user)
+
+    async def grant(self, user: Row, check_id: int | None = None, origin: str | None = None,
+                    gift_id: str | None = None) -> ClaimResult:
+        """Выдаёт подарок: автоматически за звёзды или заявкой админам (ручной режим / ошибка отправки)."""
+        user_id = user["user_id"]
+        gift_id = gift_id or self.settings.get("gift_id")
         error: str | None = None
         if self.settings.get("reward_mode") == "auto":
-            error = await self.send_gift(user_id)
+            error = await self.send_gift(user_id, gift_id)
             if error is None:
-                await self.db.create_claim(user_id, "sent", "auto", gift_id)
+                await self.db.create_claim(user_id, "sent", "auto", gift_id, check_id=check_id)
                 return ClaimResult.SENT
 
-        claim_id = await self.db.create_claim(user_id, "pending", None, gift_id, error)
-        await self._notify_admins_about_claim(claim_id, user, error)
+        claim_id = await self.db.create_claim(user_id, "pending", None, gift_id, error, check_id=check_id)
+        await self._notify_admins_about_claim(claim_id, user, error, origin)
         return ClaimResult.PENDING
 
-    async def _notify_admins_about_claim(self, claim_id: int, user: Row, error: str | None) -> None:
+    async def _notify_admins_about_claim(self, claim_id: int, user: Row, error: str | None,
+                                         origin: str | None = None) -> None:
         p = calc_progress(user, self.settings)
         username = f" (@{esc(user['username'])})" if user["username"] else ""
-        text = (f"🧸 <b>Заявка #{claim_id} на награду</b>\n\n"
+        text = (f"🧸 <b>Заявка #{claim_id} на награду</b>" + (f" · {origin}" if origin else "") + "\n\n"
                 f"👤 {user_link(user['user_id'], user['full_name'])}{username}\n"
                 f"🆔 <code>{user['user_id']}</code>\n"
                 f"👥 Друзей: <b>{p.total}</b> · наград получено: {p.claimed}")
@@ -194,7 +201,7 @@ class RewardService:
 
         user_id = claim["user_id"]
         if action == "send":
-            error = await self.send_gift(user_id)
+            error = await self.send_gift(user_id, claim["gift_id"])
             if error:
                 await self.db.set_claim_error(claim_id, error)
                 return False, f"Не удалось отправить: {error}"

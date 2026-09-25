@@ -10,11 +10,13 @@ from aiogram.utils.callback_answer import CallbackAnswerMiddleware
 
 from bot.config import Config, load_config
 from bot.database import Database
-from bot.handlers import user
+from bot.handlers import inline, user
 from bot.handlers.admin import build_admin_router
 from bot.middlewares import SubscriptionGate, ThrottlingMiddleware, UserMiddleware
 from bot.services.admins import AdminRegistry
 from bot.services.broadcast import Broadcaster
+from bot.services.checks import CheckService
+from bot.services.gifts import GiftCatalog, GiftImages
 from bot.services.rewards import RewardService
 from bot.services.subscription import SubscriptionService
 from bot.settings import Settings
@@ -34,11 +36,14 @@ async def build(config: Config, bot: Bot) -> tuple[Dispatcher, Database, AdminRe
     rewards = RewardService(bot, db, settings, admins)
     broadcaster = Broadcaster(bot, db)
     me = await bot.get_me()
+    checks = CheckService(bot, db, settings, subs, rewards, me.username)
+    gift_images = GiftImages(bot, db, settings, GiftCatalog(bot), admins)
 
     dp = Dispatcher(
         storage=MemoryStorage(),
         config=config, db=db, settings=settings, admins=admins, subs=subs,
-        rewards=rewards, broadcaster=broadcaster, bot_username=me.username,
+        rewards=rewards, broadcaster=broadcaster, checks=checks, gift_images=gift_images,
+        bot_username=me.username,
     )
 
     throttling = ThrottlingMiddleware()
@@ -50,7 +55,7 @@ async def build(config: Config, bot: Bot) -> tuple[Dispatcher, Database, AdminRe
     user.router.message.middleware(SubscriptionGate())
     user.router.callback_query.middleware(SubscriptionGate())
 
-    dp.include_routers(build_admin_router(), user.service_router, user.router)
+    dp.include_routers(build_admin_router(), inline.router, user.service_router, user.router)
     return dp, db, admins
 
 
@@ -62,6 +67,7 @@ async def main() -> None:
         link_preview=LinkPreviewOptions(is_disabled=True),
     ))
     dp, db, admins = await build(config, bot)
+    dp["gift_images"].schedule()  # догенерировать картинки чеков для новых подарков
 
     await admins.setup_commands()
     await bot.delete_webhook(drop_pending_updates=False)

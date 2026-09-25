@@ -68,6 +68,9 @@ async def card_screen(db: Database, config: Config, claim_id: int, back_status: 
         f"👥 Друзей засчитано: <b>{total}</b>",
         f"📅 Создана: {fmt_dt(c['created_at'], config.tz)}",
     ]
+    if c["check_id"]:
+        check = await db.get_check(c["check_id"])
+        lines.append(f"🎟 По чеку: <code>{check['code'] if check else 'удалён'}</code>")
     if c["processed_at"]:
         how = f" · {METHOD.get(c['method'], c['method'])}" if c["method"] else ""
         lines.append(f"🏁 Обработана: {fmt_dt(c['processed_at'], config.tz)}{how}")

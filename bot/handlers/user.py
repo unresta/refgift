@@ -11,11 +11,12 @@ from aiosqlite import Row
 from bot.callbacks import U
 from bot.database import Database
 from bot.services.admins import AdminRegistry
+from bot.services.checks import CHECK_PREFIX, CheckService, CheckStatus
 from bot.services.rewards import ClaimResult, RewardService
 from bot.services.subscription import SubscriptionService
 from bot.settings import Settings
 from bot.utils import esc, render_template, show
-from bot.views import (FRIENDS_PAGE, back_to_menu, friends_screen, invite_screen, kb, menu_screen,
+from bot.views import (FRIENDS_PAGE, activation_screen, back_to_menu, friends_screen, invite_screen, kb, menu_screen,
                        subscribe_screen, top_screen)
 
 log = logging.getLogger(__name__)
@@ -38,23 +39,44 @@ async def open_menu(event: Message | CallbackQuery, user_id: int, db: Database, 
     await show(event, *menu_screen(user, settings, pending is not None, is_admin))
 
 
-async def pass_gate(event: Message | CallbackQuery, user: Row, db: Database, settings: Settings,
-                    subs: SubscriptionService, rewards: RewardService, is_admin: bool) -> bool:
-    """Проверяет подписку без кэша. Нет подписки — экран подписки, есть — засчитываем и в меню."""
-    missing = await subs.missing(user["user_id"], use_cache=False)
+async def pass_gate(event: Message | CallbackQuery, user_id: int, db: Database, settings: Settings,
+                    subs: SubscriptionService, rewards: RewardService, checks: CheckService,
+                    is_admin: bool) -> list[Row]:
+    """Проверяет подписку без кэша. Нет подписки — экран подписки; есть — активируем ждущий чек или открываем меню.
+
+    Возвращает список каналов, на которые пользователь ещё не подписан.
+    """
+    user = await db.get_user(user_id)
+    assert user is not None
+    if user["pending_check"]:
+        act = await checks.activate(user_id, user["pending_check"])  # внутри — своя проверка подписки
+        if act.status is CheckStatus.NEED_SUB:
+            await show(event, *subscribe_screen(settings, user["full_name"], act.missing, for_check=True))
+            return act.missing
+        await show(event, *activation_screen(act, settings))
+        return []
+
+    missing = await subs.missing(user_id, use_cache=False)
     if missing:
         await show(event, *subscribe_screen(settings, user["full_name"], missing))
-        return False
-    await rewards.complete_verification(user["user_id"])
-    await open_menu(event, user["user_id"], db, settings, is_admin)
-    return True
+        return missing
+    await rewards.complete_verification(user_id)
+    await open_menu(event, user_id, db, settings, is_admin)
+    return []
 
 
 @router.message(CommandStart(), flags={"skip_sub": True})
 async def cmd_start(message: Message, command: CommandObject, user: Row, is_new: bool, db: Database,
-                    settings: Settings, subs: SubscriptionService, rewards: RewardService, is_admin: bool) -> None:
+                    settings: Settings, subs: SubscriptionService, rewards: RewardService, checks: CheckService,
+                    is_admin: bool) -> None:
     args = (command.args or "").strip()
-    if args.startswith(AD_PREFIX):
+    if args.startswith(CHECK_PREFIX):
+        code = args.removeprefix(CHECK_PREFIX)
+        check = await db.get_check_by_code(code)
+        await db.set_pending_check(user["user_id"], code)
+        if check and is_new:
+            await db.set_source_check(user["user_id"], check["id"])
+    elif args.startswith(AD_PREFIX):
         link = await db.get_ad_link_by_code(args.removeprefix(AD_PREFIX))
         if link:
             await db.track_ad_click(link["id"], user["user_id"], is_new)
@@ -62,23 +84,20 @@ async def cmd_start(message: Message, command: CommandObject, user: Row, is_new:
         referrer_id = int(args[1:])
         if referrer_id != user["user_id"] and await db.get_user(referrer_id):
             await db.set_referrer(user["user_id"], referrer_id)
-    await pass_gate(message, user, db, settings, subs, rewards, is_admin)
+    await pass_gate(message, user["user_id"], db, settings, subs, rewards, checks, is_admin)
 
 
 @router.callback_query(U.filter(F.a == "check"), flags={"skip_sub": True})
 async def check_subscription(call: CallbackQuery, callback_answer: CallbackAnswer, user: Row, db: Database,
                              settings: Settings, subs: SubscriptionService, rewards: RewardService,
-                             is_admin: bool) -> None:
-    missing = await subs.missing(user["user_id"], use_cache=False)
+                             checks: CheckService, is_admin: bool) -> None:
+    missing = await pass_gate(call, user["user_id"], db, settings, subs, rewards, checks, is_admin)
     if missing:
         names = ", ".join(ch["title"] for ch in missing)
         callback_answer.text = f"❌ Ты ещё не подписан: {names}"[:200]
         callback_answer.show_alert = True
-        await show(call, *subscribe_screen(settings, user["full_name"], missing))
-        return
-    callback_answer.text = "✅ Подписка подтверждена!"
-    await rewards.complete_verification(user["user_id"])
-    await open_menu(call, user["user_id"], db, settings, is_admin)
+    else:
+        callback_answer.text = "✅ Подписка подтверждена!"
 
 
 @router.callback_query(U.filter(F.a == "menu"))

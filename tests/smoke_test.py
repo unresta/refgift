@@ -15,9 +15,10 @@ from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.base import BaseSession
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.methods import (CopyMessage, CreateChatInviteLink, GetAvailableGifts, GetChat, GetChatMember,
-                             GetChatMemberCount, GetMe, GetMyStarBalance, SendDocument, SendGift, TelegramMethod)
-from aiogram.types import ChatFullInfo, ChatInviteLink, Gifts, MessageId, StarAmount, User
+from aiogram.methods import (AnswerInlineQuery, CopyMessage, CreateChatInviteLink, EditMessageCaption,
+                             GetAvailableGifts, GetChat, GetChatMember, GetChatMemberCount, GetFile, GetMe,
+                             GetMyStarBalance, SendDocument, SendGift, SendPhoto, TelegramMethod)
+from aiogram.types import ChatFullInfo, ChatInviteLink, File, Gifts, MessageId, StarAmount, User
 
 from bot import middlewares
 from bot.__main__ import build
@@ -40,8 +41,9 @@ class FakeSession(BaseSession):
     async def close(self) -> None:
         pass
 
-    async def stream_content(self, *a, **kw):
-        yield b""
+    async def stream_content(self, url, *a, **kw):
+        """Скачивание файлов: картинка чека (jpg) и превью подарков (webp)."""
+        yield _image("WEBP" if "thumb" in url else "JPEG")
 
     def by_type(self, cls):
         return [c for c in self.calls if isinstance(c, cls)]
@@ -80,11 +82,16 @@ class FakeSession(BaseSession):
                 raise TelegramBadRequest(method=method, message=self.gift_error)
             return True
         if isinstance(method, GetAvailableGifts):
+            thumb = {"file_id": "thumb", "file_unique_id": "t", "width": 64, "height": 64}
             sticker = {"file_id": "f", "file_unique_id": "u", "type": "regular", "width": 1, "height": 1,
-                       "is_animated": False, "is_video": False}
+                       "is_animated": False, "is_video": False, "thumbnail": thumb}
             return Gifts(gifts=[{"id": "g_bear", "star_count": 15, "sticker": {**sticker, "emoji": "🧸"}},
                                 {"id": "g_rose", "star_count": 25, "sticker": {**sticker, "emoji": "🌹"},
-                                 "remaining_count": 10}])
+                                 "remaining_count": 10},
+                                {"id": "g_premium", "star_count": 50, "is_premium": True,
+                                 "sticker": {**sticker, "emoji": "💎"}},
+                                {"id": "g_soldout", "star_count": 99, "remaining_count": 0,
+                                 "sticker": {**sticker, "emoji": "🏆"}}])
         if isinstance(method, GetChat):
             return ChatFullInfo(id=-1002, type="channel", title="Private Chan", accent_color_id=0,
                                 max_reaction_count=0, accepted_gift_types={
@@ -93,12 +100,27 @@ class FakeSession(BaseSession):
         if isinstance(method, CreateChatInviteLink):
             return ChatInviteLink(invite_link="https://t.me/+secret", creator=User(id=BOT_ID, is_bot=True,
                                   first_name="Bot"), creates_join_request=False, is_primary=False, is_revoked=False)
+        if isinstance(method, GetFile):
+            return File(file_id=method.file_id, file_unique_id="u", file_path=f"files/{method.file_id}")
+        if isinstance(method, SendPhoto):
+            n = next(ids)
+            return _msg(method.chat_id, None, from_bot=True, photo=[
+                {"file_id": f"photo{n}", "file_unique_id": f"p{n}", "width": 1280, "height": 720}])
         if isinstance(method, CopyMessage):
             return MessageId(message_id=next(ids))
         if name in ("SendMessage", "EditMessageText", "SendDocument", "SendInvoice"):
             chat_id = getattr(method, "chat_id", None) or ADMIN
             return _msg(chat_id, getattr(method, "text", None) or "doc", from_bot=True)
         return True
+
+
+def _image(fmt: str) -> bytes:
+    import io
+
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGBA" if fmt == "WEBP" else "RGB", (320, 180), (90, 60, 160)).save(buf, fmt)
+    return buf.getvalue()
 
 
 def _member(data):
@@ -110,12 +132,15 @@ def _member(data):
 def _msg(chat_id, text, from_bot=False, **extra):
     from aiogram.types import Message
     uid = BOT_ID if from_bot else chat_id
-    return Message.model_validate({
+    data = {
         "message_id": next(ids), "date": int(time.time()),
         "chat": {"id": chat_id, "type": "private", "first_name": "U"},
         "from": {"id": uid, "is_bot": from_bot, "first_name": f"User{uid}"},
-        "text": text, **extra,
-    })
+        **extra,
+    }
+    if text is not None:
+        data["text"] = text
+    return Message.model_validate(data)
 
 
 def msg_update(uid: int, text: str, **extra) -> dict:
@@ -124,6 +149,13 @@ def msg_update(uid: int, text: str, **extra) -> dict:
         "chat": {"id": uid, "type": "private", "first_name": f"User{uid}"},
         "from": {"id": uid, "is_bot": False, "first_name": f"User{uid}", "username": f"user{uid}"},
         "text": text, **extra,
+    }}
+
+
+def inline_update(uid: int, query: str) -> dict:
+    return {"update_id": next(ids), "inline_query": {
+        "id": str(next(ids)), "query": query, "offset": "",
+        "from": {"id": uid, "is_bot": False, "first_name": f"User{uid}"},
     }}
 
 
@@ -370,6 +402,111 @@ async def scenario(dp, db, bot, session) -> None:
     await feed(cb_update(ADMIN, A(s="lk", a="del_ok", id=lid).pack()))
     check(await db.get_ad_link(lid) is None and (await db.get_user(400))["ad_link_id"] is None,
           "удаление ссылки отвязывает пользователей")
+
+    print("Чеки на подарки")
+    await settings.set("reward_mode", "auto")
+    await settings.set("gift_id", "g_bear")
+    gift_images = dp["gift_images"]
+
+    await feed(inline_update(ADMIN, "3 Тестовый чек"))
+    results = session.by_type(AnswerInlineQuery)[-1].results
+    check([r.title.split()[0] for r in results] == ["🧸", "🌹"],
+          "inline показывает все подарки (без premium и распроданных), по умолчанию — первым")
+    check("по умолчанию" in results[0].title and type(results[0]).__name__ == "InlineQueryResultArticle",
+          "без картинки — список текстовых чеков")
+    drafts = await db.val("SELECT COUNT(*) FROM checks")
+    await feed(inline_update(ADMIN, "3 Тестовый чек"))
+    check(await db.val("SELECT COUNT(*) FROM checks") == drafts, "повторный запрос не плодит черновики")
+
+    await feed(cb_update(ADMIN, A(s="ck", a="photo").pack()))
+    await feed(msg_update(ADMIN, None, photo=[{"file_id": "base_photo", "file_unique_id": "b",
+                                               "width": 1280, "height": 720}]))
+    check(settings.get("check_photo") == "base_photo", "картинка чека загружена фото")
+    await gift_images.wait()
+    check(await db.val("SELECT COUNT(*) FROM gift_images WHERE base_file_id = 'base_photo'") == 2,
+          "сгенерированы картинки со значком для каждого подарка")
+
+    await feed(inline_update(ADMIN, "3"))
+    results = session.by_type(AnswerInlineQuery)[-1].results
+    photo_ids = {r.photo_file_id for r in results}
+    check(all(type(r).__name__ == "InlineQueryResultCachedPhoto" for r in results) and len(photo_ids) == 2
+          and "base_photo" not in photo_ids, "с картинкой — у каждого подарка своя картинка")
+    bear = await db.get_check(int(results[0].id.removeprefix("chk:")))
+    check(bear["gift_id"] == "g_bear" and bear["total"] == 3, "чек привязан к выбранному подарку")
+    rose = await db.get_check(int(results[1].id.removeprefix("chk:")))
+
+    await feed({"update_id": next(ids), "chosen_inline_result": {
+        "result_id": f"chk:{bear['id']}", "from": {"id": ADMIN, "is_bot": False, "first_name": "A"},
+        "query": "3", "inline_message_id": "imsg1"}})
+    check((await db.get_check(bear["id"]))["is_sent"] == 1, "отправленный чек отмечен (inline feedback)")
+
+    code = bear["code"]
+    gifts_before = len(session.by_type(SendGift))
+    await feed(msg_update(500, f"/start c_{code}"))
+    check("по чеку" in session.texts_to(500)[-1] and (await db.get_user(500))["pending_check"] == code,
+          "без подписки — экран подписки, чек ждёт")
+    check(len(session.by_type(SendGift)) == gifts_before, "без подписки подарок не выдан")
+    session.members.update({(CHANNEL, 500), (-1002, 500)})
+    await feed(cb_update(500, U(a="check").pack()))
+    gift = session.by_type(SendGift)[-1]
+    check(gift.user_id == 500 and gift.gift_id == "g_bear", "после подписки чек активирован — отправлен 🧸")
+    check("Чек активирован" in session.texts_to(500)[-1], "пользователь видит результат")
+    check((await db.get_user(500))["source_check_id"] == bear["id"], "новый пользователь привязан к чеку")
+
+    await feed(msg_update(500, f"/start c_{code}"))
+    check("уже активировал" in session.texts_to(500)[-1] and len(session.by_type(SendGift)) == gifts_before + 1,
+          "повторно активировать нельзя")
+
+    session.members.discard((CHANNEL, 100))
+    await feed(msg_update(100, f"/start c_{code}"))
+    check("по чеку" in session.texts_to(100)[-1] and len(session.by_type(SendGift)) == gifts_before + 1,
+          "подписка перепроверяется перед активацией (отписался — не выдали)")
+    session.members.add((CHANNEL, 100))
+    session.members.add((-1002, 100))
+
+    for uid in (501, 502):
+        session.members.update({(CHANNEL, uid), (-1002, uid)})
+        await feed(msg_update(uid, f"/start c_{code}"))
+    check((await db.get_check(bear["id"]))["used"] == 3, "3 активации из 3")
+    closed = session.by_type(EditMessageCaption)
+    check(closed and closed[-1].inline_message_id == "imsg1" and "закончился" in closed[-1].caption,
+          "сообщение чека в чате помечено «закончился»")
+    session.members.update({(CHANNEL, 503), (-1002, 503)})
+    await feed(msg_update(503, f"/start c_{code}"))
+    check("закончился" in session.texts_to(503)[-1] and (await db.get_check(bear["id"]))["used"] == 3,
+          "лимит активаций соблюдается")
+
+    await settings.set("reward_mode", "manual")
+    await feed(msg_update(503, f"/start c_{rose['code']}"))
+    claim = (await db.list_claims("pending", 10, 0))[0]
+    check(claim["gift_id"] == "g_rose" and claim["check_id"] == rose["id"], "ручной режим: заявка с подарком чека")
+    await feed(cb_update(ADMIN, A(s="cl", a="send", id=claim["id"]).pack()))
+    check(session.by_type(SendGift)[-1].gift_id == "g_rose", "админ выдал именно подарок из чека 🌹")
+    await settings.set("reward_mode", "auto")
+
+    await feed(msg_update(504, "/start c_nonexistent"))
+    check("не найден" in session.texts_to(504)[-1] or "Я подписался" in str(session.screen().reply_markup),
+          "несуществующий чек")
+
+    for cb in (A(s="ck"), A(s="ck", a="card", id=bear["id"]), A(s="ck", a="acts", id=bear["id"]),
+               A(s="ck", a="preview"), A(s="ck", a="toggle", id=rose["id"]), A(s="ck", a="toggle", id=rose["id"]),
+               A(s="ck", a="del", id=rose["id"])):
+        await feed(cb_update(ADMIN, cb.pack()))
+    check("🧸 · 15 ⭐" in [t for t in session.texts_to(ADMIN) if "🎟 <b>Чек</b>" in t][0], "карточка чека")
+    await feed(cb_update(ADMIN, A(s="ck", a="del_ok", id=rose["id"]).pack()))
+    check(await db.get_check(rose["id"]) is None, "чек удалён")
+
+    await feed(cb_update(ADMIN, A(s="ck", a="photo").pack()))
+    await feed(msg_update(ADMIN, None, document={"file_id": "png_doc", "file_unique_id": "d",
+                                                 "file_name": "check.png", "mime_type": "image/png",
+                                                 "file_size": 2048}))
+    check(settings.get("check_photo").startswith("photo"), "картинка файлом PNG перезалита как фото")
+    await gift_images.wait()
+
+    await feed(inline_update(100, ""))
+    res = session.by_type(AnswerInlineQuery)[-1].results
+    check(len(res) == 1 and "start=r100" in res[0].input_message_content.message_text,
+          "обычный пользователь в inline делится реф-ссылкой")
 
     print("Рассылка")
     await feed(cb_update(ADMIN, A(s="bc").pack()))

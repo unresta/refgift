@@ -5,6 +5,7 @@ from aiogram.types import InlineKeyboardButton as Btn, InlineKeyboardMarkup
 from aiosqlite import Row
 
 from bot.callbacks import A, U
+from bot.services.checks import Activation, CheckStatus
 from bot.services.rewards import calc_progress
 from bot.settings import Settings
 from bot.utils import esc, plural, render_template
@@ -32,8 +33,10 @@ def ref_link(bot_username: str, user_id: int) -> str:
     return f"https://t.me/{bot_username}?start=r{user_id}"
 
 
-def subscribe_screen(settings: Settings, name: str, missing: list[Row]) -> Screen:
+def subscribe_screen(settings: Settings, name: str, missing: list[Row], for_check: bool = False) -> Screen:
     text = render_template(settings.get("text_subscribe"), name=esc(name))
+    if for_check:
+        text += f"\n\n🎁 <b>Сразу после подписки получишь подарок {settings.get('gift_emoji')} по чеку!</b>"
     rows = []
     for i, ch in enumerate(missing, 1):
         url = channel_url(ch)
@@ -156,6 +159,24 @@ def top_screen(top: list[Row], my_rank: int | None, my_total: int, user_id: int)
     lines.append(f"📍 Твоё место: <b>{my_rank}</b> · друзей: <b>{my_total}</b>" if my_rank
                  else "📍 Ты пока не в рейтинге — пригласи первого друга!")
     return "\n".join(lines), kb(
+        [Btn(text="🔗 Пригласить друзей", style="primary", callback_data=U(a="invite").pack())],
+        back_to_menu(),
+    )
+
+
+def activation_screen(act: Activation, settings: Settings) -> Screen:
+    gift = (act.check["gift_emoji"] if act.check and act.check["gift_emoji"] else None) or settings.get("gift_emoji")
+    goal = settings.goal
+    more = f"\n\n💡 Хочешь ещё? Пригласи <b>{goal}</b> {plural(goal, 'друга', 'друзей', 'друзей')} — и получи {settings.get('gift_emoji')}!"
+    texts = {
+        CheckStatus.SENT: f"🎉 <b>Чек активирован!</b>\n\nПодарок {gift} уже у тебя — загляни в свой профиль → «Подарки».",
+        CheckStatus.PENDING: f"✅ <b>Чек активирован!</b>\n\nПодарок {gift} отправим в ближайшее время — пришлём уведомление.",
+        CheckStatus.ALREADY: "🙌 <b>Ты уже активировал этот чек.</b>\n\nОдин чек — один подарок на человека.",
+        CheckStatus.EXHAUSTED: "😔 <b>Чек закончился</b> — все подарки уже разобрали.",
+        CheckStatus.INACTIVE: "⛔ <b>Этот чек больше не действует.</b>",
+        CheckStatus.NOT_FOUND: "❓ <b>Чек не найден.</b> Проверь ссылку.",
+    }
+    return texts[act.status] + more, kb(
         [Btn(text="🔗 Пригласить друзей", style="primary", callback_data=U(a="invite").pack())],
         back_to_menu(),
     )

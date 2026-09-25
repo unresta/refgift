@@ -82,7 +82,7 @@ async def home_screen(bot: Bot, db: Database, settings: Settings, config: Config
          btn(f"📢 Каналы · {len(channels)}", "ch")],
         [btn("👥 Пользователи", "us"), btn("📨 Рассылка", "bc")],
         [btn("⚙️ Настройки", "st"), btn("📝 Тексты", "tx")],
-        [btn("👮 Админы", "ad")],
+        [btn("🎟 Чеки", "ck"), btn("👮 Админы", "ad")],
         [btn("🔄 Обновить", "home", "refresh"), Btn(text="🏠 Меню бота", callback_data=U(a="menu").pack())],
     )
     return "\n".join(lines), markup
