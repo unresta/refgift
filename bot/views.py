@@ -172,7 +172,7 @@ def activation_screen(act: Activation, settings: Settings) -> Screen:
         CheckStatus.SENT: f"🎉 <b>Чек активирован!</b>\n\nПодарок {gift} уже у тебя — загляни в свой профиль → «Подарки».",
         CheckStatus.PENDING: f"✅ <b>Чек активирован!</b>\n\nПодарок {gift} отправим в ближайшее время — пришлём уведомление.",
         CheckStatus.ALREADY: "🙌 <b>Ты уже активировал этот чек.</b>\n\nОдин чек — один подарок на человека.",
-        CheckStatus.EXHAUSTED: "😔 <b>Чек закончился</b> — все подарки уже разобрали.",
+        CheckStatus.EXHAUSTED: "😔 <b>Этот чек уже разобрали</b> — но подарок можно получить и без чека.",
         CheckStatus.INACTIVE: "⛔ <b>Этот чек больше не действует.</b>",
         CheckStatus.NOT_FOUND: "❓ <b>Чек не найден.</b> Проверь ссылку.",
     }

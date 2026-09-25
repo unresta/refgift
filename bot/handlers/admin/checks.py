@@ -61,7 +61,7 @@ async def main_screen(bot: Bot, db: Database, settings: Settings, bot_username: 
     if not me.supports_inline_queries:
         lines.append("\n⚠️ <b>Inline-режим выключен.</b> Включите: @BotFather → /setinline → выберите бота.")
     if not total:
-        lines.append("\n💡 Чтобы отправленные чеки сразу появлялись здесь и помечались «закончился» в чате, "
+        lines.append("\n💡 Чтобы отправленные чеки сразу появлялись здесь, "
                      "включите @BotFather → /setinlinefeedback → Enabled. Без этого чек появится в списке "
                      "после первой активации.")
 
@@ -105,8 +105,6 @@ async def card_screen(db: Database, checks: CheckService, config: Config, check_
     if st["first_at"]:
         lines.append(f"🕒 Первая активация: {fmt_dt(st['first_at'], config.tz)} · "
                      f"последняя: {fmt_dt(st['last_at'], config.tz)}")
-    lines.append("📨 Сообщение в чате: " + ("отслеживается ✅" if c["inline_message_id"]
-                                            else "не отслеживается (нужен /setinlinefeedback)"))
     lines.append(f"\n🔗 <code>{checks.url(c['code'])}</code>")
     if recent:
         lines.append("\n<b>Последние активации:</b>")
@@ -145,14 +143,8 @@ async def cb_toggle(call: CallbackQuery, callback_data: A, callback_answer: Call
     if not c:
         return
     await db.set_check_active(c["id"], not c["is_active"])
-    fresh = await db.get_check(c["id"])
-    if c["is_active"]:
-        await checks.close_message(fresh, "⛔ <b>Чек отключён.</b>")
-        callback_answer.text = "⏸ Чек выключен — активировать его больше нельзя"
-    else:
-        if fresh["used"] < fresh["total"]:
-            await checks.reopen_message(fresh)
-        callback_answer.text = "▶️ Чек снова активен"
+    callback_answer.text = ("⏸ Чек выключен — активировать его больше нельзя" if c["is_active"]
+                            else "▶️ Чек снова активен")
     await show(call, *await card_screen(db, checks, config, c["id"]))
 
 
@@ -193,7 +185,6 @@ async def cb_delete(call: CallbackQuery, callback_data: A, callback_answer: Call
                     gift_images: GiftImages) -> None:
     c = await db.get_check(callback_data.id)
     if c:
-        await checks.close_message(c, "⛔ <b>Чек удалён.</b>")
         await db.delete_check(c["id"])
     callback_answer.text = "🗑 Чек удалён"
     await show(call, *await main_screen(bot, db, settings, bot_username, 0, gift_images))

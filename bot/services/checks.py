@@ -1,4 +1,3 @@
-import logging
 import secrets
 import string
 import time
@@ -6,7 +5,6 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Gift, InlineKeyboardButton, InlineKeyboardMarkup
 from aiosqlite import Row
 
@@ -17,7 +15,6 @@ from bot.services.subscription import SubscriptionService
 from bot.settings import Settings
 from bot.utils import esc, render_template
 
-log = logging.getLogger(__name__)
 
 CHECK_PREFIX = "c_"
 MAX_ACTIVATIONS = 10_000
@@ -134,38 +131,4 @@ class CheckService:
         result = await self.rewards.grant(user, check_id=check["id"], origin=f"🎟 чек <code>{check['code']}</code>",
                                           gift_id=check["gift_id"])
 
-        fresh = await self.db.get_check(check["id"])
-        if fresh and fresh["used"] >= fresh["total"]:
-            await self.close_message(fresh, "❌ <b>Чек закончился</b> — все подарки разобрали.")
         return Activation(CheckStatus.SENT if result is ClaimResult.SENT else CheckStatus.PENDING, check)
-
-    async def close_message(self, check: Row, note: str) -> None:
-        """Помечает отправленное сообщение с чеком как закрытое (если известен inline_message_id)."""
-        if not check["inline_message_id"]:
-            return
-        text = f"{self.caption(check)}\n\n{note}"
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-            text=f"{self.settings.get('gift_emoji')} Получить подарок за друзей",
-            url=f"https://t.me/{self.bot_username}",
-        )]])
-        try:
-            if check["with_photo"]:
-                await self.bot.edit_message_caption(inline_message_id=check["inline_message_id"], caption=text,
-                                                    reply_markup=kb)
-            else:
-                await self.bot.edit_message_text(text, inline_message_id=check["inline_message_id"], reply_markup=kb)
-        except TelegramAPIError as e:
-            log.debug("Не удалось обновить сообщение чека %s: %s", check["code"], e)
-
-    async def reopen_message(self, check: Row) -> None:
-        if not check["inline_message_id"]:
-            return
-        try:
-            if check["with_photo"]:
-                await self.bot.edit_message_caption(inline_message_id=check["inline_message_id"],
-                                                    caption=self.caption(check), reply_markup=self.keyboard(check))
-            else:
-                await self.bot.edit_message_text(self.caption(check), inline_message_id=check["inline_message_id"],
-                                                 reply_markup=self.keyboard(check))
-        except TelegramAPIError as e:
-            log.debug("Не удалось обновить сообщение чека %s: %s", check["code"], e)

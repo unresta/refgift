@@ -469,11 +469,10 @@ async def scenario(dp, db, bot, session) -> None:
         await feed(msg_update(uid, f"/start c_{code}"))
     check((await db.get_check(bear["id"]))["used"] == 3, "3 активации из 3")
     closed = session.by_type(EditMessageCaption)
-    check(closed and closed[-1].inline_message_id == "imsg1" and "закончился" in closed[-1].caption,
-          "сообщение чека в чате помечено «закончился»")
+    check(not closed, "сообщение чека в чате не меняется — люди продолжают заходить в бота")
     session.members.update({(CHANNEL, 503), (-1002, 503)})
     await feed(msg_update(503, f"/start c_{code}"))
-    check("закончился" in session.texts_to(503)[-1] and (await db.get_check(bear["id"]))["used"] == 3,
+    check("уже разобрали" in session.texts_to(503)[-1] and (await db.get_check(bear["id"]))["used"] == 3,
           "лимит активаций соблюдается")
 
     await settings.set("reward_mode", "manual")
