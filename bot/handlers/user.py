@@ -12,6 +12,7 @@ from bot.callbacks import U
 from bot.database import Database
 from bot.services.admins import AdminRegistry
 from bot.services.checks import CHECK_PREFIX, CheckService, CheckStatus
+from bot.services.reminders import ReminderService
 from bot.services.rewards import ClaimResult, RewardService
 from bot.services.subscription import SubscriptionService
 from bot.settings import Settings
@@ -69,7 +70,7 @@ async def pass_gate(event: Message | CallbackQuery, user_id: int, db: Database, 
 @router.message(CommandStart(), flags={"skip_sub": True})
 async def cmd_start(message: Message, command: CommandObject, user: Row, is_new: bool, db: Database,
                     settings: Settings, subs: SubscriptionService, rewards: RewardService, checks: CheckService,
-                    is_admin: bool) -> None:
+                    reminders: ReminderService, is_admin: bool) -> None:
     args = (command.args or "").strip()
     if args.startswith(CHECK_PREFIX):
         code = args.removeprefix(CHECK_PREFIX)
@@ -85,7 +86,19 @@ async def cmd_start(message: Message, command: CommandObject, user: Row, is_new:
         referrer_id = int(args[1:])
         if referrer_id != user["user_id"] and await db.get_user(referrer_id):
             await db.set_referrer(user["user_id"], referrer_id)
-    await pass_gate(message, user["user_id"], db, settings, subs, rewards, checks, is_admin)
+    missing = await pass_gate(message, user["user_id"], db, settings, subs, rewards, checks, is_admin)
+    if missing:
+        await reminders.on_start(await db.get_user(user["user_id"]))
+
+
+@router.callback_query(U.filter(F.a == "gift_cta"), flags={"skip_sub": True})
+async def gift_cta(call: CallbackQuery, callback_answer: CallbackAnswer, user: Row, db: Database,
+                   settings: Settings, subs: SubscriptionService, rewards: RewardService, checks: CheckService,
+                   is_admin: bool) -> None:
+    """Кнопка из напоминания: ведёт на обязательную подписку (или в меню, если уже подписан)."""
+    missing = await pass_gate(call, user["user_id"], db, settings, subs, rewards, checks, is_admin)
+    callback_answer.text = ("📢 Подпишись на каналы — и подарок твой!" if missing
+                            else "✅ Подписка уже есть — забирай подарок в меню")
 
 
 @router.callback_query(U.filter(F.a == "check"), flags={"skip_sub": True})

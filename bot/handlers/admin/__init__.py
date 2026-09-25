@@ -2,7 +2,7 @@ from aiogram import F, Router
 from aiogram.types import CallbackQuery
 
 from bot.callbacks import A
-from bot.handlers.admin import ads, broadcast, checks, channels, claims, home, options, staff, texts, users
+from bot.handlers.admin import ads, broadcast, checks, reminders, channels, claims, home, options, staff, texts, users
 from bot.handlers.admin.common import CommandResetsStateMiddleware, IsAdmin, ResetStateMiddleware
 
 
@@ -18,7 +18,7 @@ def build_admin_router() -> Router:
         pass
 
     router.include_routers(
-        home.router, ads.router, checks.router, channels.router, claims.router, users.router,
+        home.router, ads.router, checks.router, reminders.router, channels.router, claims.router, users.router,
         broadcast.router, options.router, texts.router, staff.router,
     )
     return router

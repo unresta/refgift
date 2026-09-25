@@ -17,6 +17,7 @@ from bot.services.admins import AdminRegistry
 from bot.services.broadcast import Broadcaster
 from bot.services.checks import CheckService
 from bot.services.gifts import GiftCatalog, GiftImages
+from bot.services.reminders import ReminderService
 from bot.services.rewards import RewardService
 from bot.services.subscription import SubscriptionService
 from bot.settings import Settings
@@ -38,11 +39,12 @@ async def build(config: Config, bot: Bot) -> tuple[Dispatcher, Database, AdminRe
     me = await bot.get_me()
     checks = CheckService(bot, db, settings, subs, rewards, me.username)
     gift_images = GiftImages(bot, db, settings, GiftCatalog(bot), admins)
+    reminders = ReminderService(bot, db, settings)
 
     dp = Dispatcher(
         storage=MemoryStorage(),
         config=config, db=db, settings=settings, admins=admins, subs=subs,
-        rewards=rewards, broadcaster=broadcaster, checks=checks, gift_images=gift_images,
+        rewards=rewards, broadcaster=broadcaster, checks=checks, gift_images=gift_images, reminders=reminders,
         bot_username=me.username,
     )
 
@@ -68,6 +70,7 @@ async def main() -> None:
     ))
     dp, db, admins = await build(config, bot)
     dp["gift_images"].schedule()  # догенерировать картинки чеков для новых подарков
+    dp["reminders"].start()
 
     await admins.setup_commands()
     await bot.delete_webhook(drop_pending_updates=False)
@@ -75,6 +78,7 @@ async def main() -> None:
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        await dp["reminders"].stop()
         await db.close()
         await bot.session.close()
 

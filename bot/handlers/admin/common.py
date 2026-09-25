@@ -58,6 +58,10 @@ class Input(StatesGroup):
     ad_cost = State()
     check_photo = State()
     gift_banner = State()
+    remind_interval = State()
+    remind_button = State()
+    remind_photo = State()
+    remind_text = State()
 
 
 def btn(text: str, s: str, a: str = "open", id: int = 0, p: int = 0, v: str = "",

@@ -25,7 +25,9 @@ CREATE TABLE IF NOT EXISTS users (
     last_seen       INTEGER NOT NULL,
     ad_link_id      INTEGER,                     -- рекламная ссылка, по которой пришёл
     source_check_id INTEGER,                     -- чек, по которому впервые запустил бота
-    pending_check   TEXT                         -- код чека, ждущего активации после подписки
+    pending_check   TEXT,                        -- код чека, ждущего активации после подписки
+    remind_step     INTEGER NOT NULL DEFAULT 0,  -- сколько напоминаний «забери подарок» уже отправлено
+    remind_at       INTEGER                      -- когда отправить следующее (NULL — не нужно)
 );
 CREATE INDEX IF NOT EXISTS idx_users_referrer ON users(referrer_id);
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username COLLATE NOCASE);
@@ -125,6 +127,13 @@ CREATE TABLE IF NOT EXISTS gift_banners (
     updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS reminder_log (
+    user_id INTEGER NOT NULL,
+    step    INTEGER NOT NULL,
+    sent_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reminder_log_user ON reminder_log(user_id);
+
 CREATE TABLE IF NOT EXISTS check_activations (
     check_id   INTEGER NOT NULL,
     user_id    INTEGER NOT NULL,
@@ -142,10 +151,13 @@ MIGRATIONS = [
     ("checks", "gift_id", "TEXT"),
     ("checks", "gift_emoji", "TEXT"),
     ("checks", "gift_price", "INTEGER"),
+    ("users", "remind_step", "INTEGER NOT NULL DEFAULT 0"),
+    ("users", "remind_at", "INTEGER"),
 ]
 POST_MIGRATION_SQL = """
 CREATE INDEX IF NOT EXISTS idx_users_ad_link ON users(ad_link_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_users_check ON users(source_check_id);
+CREATE INDEX IF NOT EXISTS idx_users_remind ON users(remind_at) WHERE remind_at IS NOT NULL;
 """
 
 TOTAL = "(ref_count + bonus_refs)"
@@ -241,7 +253,8 @@ class Database:
 
     async def mark_verified(self, user_id: int) -> bool:
         return bool(await self.run(
-            "UPDATE users SET verified_at = ? WHERE user_id = ? AND verified_at IS NULL", now(), user_id
+            "UPDATE users SET verified_at = ?, remind_at = NULL WHERE user_id = ? AND verified_at IS NULL",
+            now(), user_id,
         ))
 
     async def credit_referral(self, user_id: int) -> int | None:
@@ -730,6 +743,47 @@ class Database:
     async def set_source_check(self, user_id: int, check_id: int) -> None:
         await self.run("UPDATE users SET source_check_id = ? WHERE user_id = ? AND source_check_id IS NULL",
                        check_id, user_id)
+
+    # ---------- напоминания ----------
+    async def schedule_first_reminder(self, user_id: int, at: int) -> bool:
+        """Ставит первое напоминание, только если цепочка для пользователя ещё не запускалась."""
+        return bool(await self.run(
+            "UPDATE users SET remind_at = ? WHERE user_id = ? AND verified_at IS NULL "
+            "AND remind_step = 0 AND remind_at IS NULL",
+            at, user_id,
+        ))
+
+    async def due_reminders(self, ts: int, limit: int) -> list[aiosqlite.Row]:
+        return await self.all(
+            "SELECT * FROM users WHERE remind_at IS NOT NULL AND remind_at <= ? "
+            "AND verified_at IS NULL AND is_banned = 0 AND is_blocked = 0 ORDER BY remind_at LIMIT ?",
+            ts, limit,
+        )
+
+    async def reminder_sent(self, user_id: int, step: int, next_at: int | None) -> None:
+        await self.conn.execute("UPDATE users SET remind_step = ?, remind_at = ? WHERE user_id = ?",
+                                (step, next_at, user_id))
+        await self.conn.execute("INSERT INTO reminder_log (user_id, step, sent_at) VALUES (?, ?, ?)",
+                                (user_id, step, now()))
+        await self.conn.commit()
+
+    async def cancel_reminder(self, user_id: int) -> None:
+        await self.run("UPDATE users SET remind_at = NULL WHERE user_id = ?", user_id)
+
+    async def reminder_stats(self) -> dict[str, object]:
+        queued = await self.val(
+            "SELECT COUNT(*) FROM users WHERE remind_at IS NOT NULL AND verified_at IS NULL "
+            "AND is_banned = 0 AND is_blocked = 0"
+        )
+        sent = {r[0]: r[1] for r in await self.all("SELECT step, COUNT(*) FROM reminder_log GROUP BY step")}
+        # Прошли подписку после последнего полученного напоминания — по номеру этого напоминания.
+        converted = {r[0]: r[1] for r in await self.all(
+            "SELECT r.step, COUNT(*) FROM (SELECT user_id, MAX(step) AS step, MAX(sent_at) AS last "
+            "FROM reminder_log GROUP BY user_id) r JOIN users u USING(user_id) "
+            "WHERE u.verified_at IS NOT NULL AND u.verified_at >= r.last GROUP BY r.step"
+        )}
+        reached = await self.val("SELECT COUNT(DISTINCT user_id) FROM reminder_log")
+        return {"queued": queued, "sent": sent, "converted": converted, "reached": reached}
 
     # ---------- settings ----------
     async def load_settings(self) -> dict[str, str]:

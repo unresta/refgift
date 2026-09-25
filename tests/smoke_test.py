@@ -550,6 +550,90 @@ async def scenario(dp, db, bot, session) -> None:
     check(len(res) == 1 and "start=r100" in res[0].input_message_content.message_text,
           "обычный пользователь в inline делится реф-ссылкой")
 
+    print("Напоминания")
+    import bot.services.reminders as rem_mod
+    reminders = dp["reminders"]
+    clock = {"offset": 0}
+    real_now = rem_mod.now
+    rem_mod.now = lambda: real_now() + clock["offset"]
+
+    async def tick_at(minutes: int) -> int:
+        clock["offset"] = minutes * 60 + 1
+        return await reminders.tick()
+
+    try:
+        await feed(msg_update(600, "/start"))
+        u = await db.get_user(600)
+        check(u["remind_at"] is not None and u["remind_step"] == 0, "не прошёл подписку — напоминание запланировано")
+        check(await tick_at(0) == 0, "раньше интервала ничего не шлём")
+        await tick_at(5)
+        first = session.texts_to(600)[-1]
+        check("твой подарок ждёт" in first and "ЗАБРАТЬ ПОДАРОК" in str(session.screen().reply_markup),
+              "через 5 мин — напоминание №1 с кнопкой")
+        check(await tick_at(6) == 0, "до следующего интервала — тишина")
+        await tick_at(10)
+        check("пока что" in session.texts_to(600)[-1], "через 10 мин — другой вариант текста")
+
+        await feed(cb_update(600, U(a="gift_cta").pack()))
+        check("Я подписался" in str(session.screen().reply_markup), "кнопка «ЗАБРАТЬ ПОДАРОК» ведёт на подписку")
+        session.members.update({(CHANNEL, 600), (-1002, 600)})
+        await feed(cb_update(600, U(a="check").pack()))
+        u = await db.get_user(600)
+        check(u["verified_at"] is not None and u["remind_at"] is None, "подписался — напоминания остановлены")
+        before = len(session.texts_to(600))
+        await tick_at(15)
+        check(len(session.texts_to(600)) == before, "подписавшемуся больше не пишем")
+
+        await feed(msg_update(601, "/start"))
+        clock["offset"] = 0
+        await reminders.db.run("UPDATE users SET remind_at = ? WHERE user_id = 601", real_now())
+        for m in (1, 7, 13, 19, 25):
+            await tick_at(m)
+        u = await db.get_user(601)
+        check(u["remind_step"] == 3 and u["remind_at"] is None, "ровно 3 напоминания, дальше цепочка закрыта")
+
+        await feed(msg_update(100, "/start"))
+        check((await db.get_user(100))["remind_at"] is None, "подписанному напоминания не ставятся")
+
+        st = await db.reminder_stats()
+        log600 = [r[0] for r in await db.all("SELECT step FROM reminder_log WHERE user_id = 600 ORDER BY step")]
+        others = await db.val("SELECT COUNT(DISTINCT user_id) FROM reminder_log WHERE user_id NOT IN (600, 601)")
+        check(log600 == [1, 2] and st["converted"].get(2) == 1 and st["reached"] == 2 + others,
+              f"статистика: {st['reached']} получили, подписались после №2: {st['converted'].get(2)}")
+
+        for cb in (A(s="rm"), A(s="rm", a="count", id=5), A(s="rm", a="interval", id=10), A(s="rm", a="texts"),
+                   A(s="rm", a="text", id=1)):
+            await feed(cb_update(ADMIN, cb.pack()))
+        check(reminders.count == 5 and reminders.interval == 600, "количество и интервал меняются из админки")
+        await feed(cb_update(ADMIN, A(s="rm", a="text_edit", id=1).pack()))
+        await feed(msg_update(ADMIN, "Эй {name}, забери {gift}!", entities=[{"type": "bold", "offset": 0, "length": 2}]))
+        check(reminders.texts()[0] == "<b>Эй</b> {name}, забери {gift}!", "вариант отредактирован с форматированием")
+        await feed(cb_update(ADMIN, A(s="rm", a="text_add").pack()))
+        await feed(msg_update(ADMIN, "Шестой вариант"))
+        check(len(reminders.texts()) == 6, "вариант добавлен")
+        await feed(cb_update(ADMIN, A(s="rm", a="text_del", id=6).pack()))
+        await feed(cb_update(ADMIN, A(s="rm", a="text_reset").pack()))
+        check(len(reminders.texts()) == 5 and "твой подарок ждёт" in reminders.texts()[0], "стандартные тексты")
+        await feed(cb_update(ADMIN, A(s="rm", a="button").pack()))
+        await feed(msg_update(ADMIN, "🔥 ХОЧУ ПОДАРОК"))
+        check(settings.get("remind_button") == "🔥 ХОЧУ ПОДАРОК", "текст кнопки изменён")
+        await feed(cb_update(ADMIN, A(s="rm", a="photo").pack()))
+        await feed(msg_update(ADMIN, None, photo=[{"file_id": "remind_pic", "file_unique_id": "rp",
+                                                   "width": 800, "height": 400}]))
+        photos_before = len(session.by_type(SendPhoto))
+        await feed(cb_update(ADMIN, A(s="rm", a="preview").pack()))
+        previews = session.by_type(SendPhoto)[photos_before:]
+        check(len(previews) == 5 and previews[0].photo == "remind_pic" and "ХОЧУ" in str(previews[0].reply_markup),
+              "превью: 5 напоминаний с картинкой и новой кнопкой")
+
+        await feed(cb_update(ADMIN, A(s="rm", a="toggle").pack()))
+        await feed(msg_update(602, "/start"))
+        check(not reminders.enabled and (await db.get_user(602))["remind_at"] is None,
+              "выключены — новым пользователям не ставятся")
+        await feed(cb_update(ADMIN, A(s="rm", a="toggle").pack()))
+    finally:
+        rem_mod.now = real_now
+
     print("Рассылка")
     await feed(cb_update(ADMIN, A(s="bc").pack()))
     await feed(msg_update(ADMIN, "Новость!"))
