@@ -1,12 +1,12 @@
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, LabeledPrice, Message
+from aiogram.types import CallbackQuery, Message
 from aiogram.utils.callback_answer import CallbackAnswer
 
 from bot.callbacks import A
 from bot.handlers.admin.common import Input, back, btn, drop_prompt, kb, prompt
-from bot.handlers.admin.home import friends, star_balance
+from bot.handlers.admin.home import friends, star_balance, topup_button
 from bot.services.rewards import RewardService
 from bot.services.subscription import SubscriptionService
 from bot.settings import Settings
@@ -144,14 +144,13 @@ async def cb_gifts(call: CallbackQuery, callback_answer: CallbackAnswer, bot: Bo
         buttons.append(btn(f"{mark}{emoji} {g.star_count}⭐{left}", "st", "gift", v=g.id,
                            style="success" if g.id == current else None))
     rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
-    rows.append([btn("⭐ Пополнить баланс", "st", "topup", style="primary"),
-                 btn("🧪 Тест себе", "st", "test")])
+    rows.append(topup_button(balance, settings, "gifts"))
+    rows.append([btn("🧪 Тест себе", "st", "test")])
     rows.append(back("st"))
     await show(call, "🧸 <b>Выберите подарок</b>\n\n"
                      f"Сейчас: {settings.get('gift_emoji')} · {settings.get('gift_price')} ⭐\n"
                      f"Баланс бота: <b>{balance if balance is not None else '—'}</b> ⭐\n\n"
-                     "Подарок оплачивается звёздами с баланса бота — пополнить можно кнопкой "
-                     "«⭐ Пополнить баланс».\n"
+                     "Подарок оплачивается звёздами с баланса бота.\n"
                      "<i>(N) — осталось лимитированных подарков.</i>", kb(*rows))
 
 
@@ -171,32 +170,6 @@ async def cb_pick_gift(call: CallbackQuery, callback_data: A, callback_answer: C
     await settings.set("gift_price", gift.star_count)
     callback_answer.text = f"Выбран {gift.sticker.emoji} за {gift.star_count} ⭐"
     await cb_gifts(call, callback_answer, bot, settings)
-
-
-TOPUP_AMOUNTS = [15, 50, 100, 250, 500, 1000]
-
-
-@router.callback_query(A.filter((F.s == "st") & (F.a == "topup")))
-async def cb_topup(call: CallbackQuery, settings: Settings) -> None:
-    price = max(1, settings.get_int("gift_price"))
-    buttons = [btn(f"{n} ⭐ · ~{n // price} {settings.get('gift_emoji')}", "st", "pay", id=n)
-               for n in TOPUP_AMOUNTS]
-    await show(call, "⭐ <b>Пополнение баланса бота</b>\n\n"
-                     "Бот пришлёт счёт в Telegram Stars — после оплаты звёзды поступят на баланс бота "
-                     "и будут тратиться на подарки.", kb(*(buttons[i:i + 2] for i in range(0, 6, 2)),
-                                                         back("st", "gifts")))
-
-
-@router.callback_query(A.filter((F.s == "st") & (F.a == "pay")))
-async def cb_pay(call: CallbackQuery, callback_data: A) -> None:
-    amount = max(1, min(10000, callback_data.id))
-    await call.message.answer_invoice(
-        title=f"Пополнение на {amount} ⭐",
-        description="Звёзды поступят на баланс бота и пойдут на подарки пользователям.",
-        payload=f"topup:{amount}",
-        currency="XTR",
-        prices=[LabeledPrice(label="Пополнение", amount=amount)],
-    )
 
 
 @router.callback_query(A.filter((F.s == "st") & (F.a == "test")))

@@ -17,7 +17,7 @@ from aiogram.client.session.base import BaseSession
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import (AnswerInlineQuery, CopyMessage, CreateChatInviteLink, EditMessageCaption,
                              GetAvailableGifts, GetChat, GetChatMember, GetChatMemberCount, GetFile, GetMe,
-                             GetMyStarBalance, SendDocument, SendGift, SendPhoto, TelegramMethod)
+                             GetMyStarBalance, SendDocument, SendGift, SendInvoice, SendPhoto, TelegramMethod)
 from aiogram.types import ChatFullInfo, ChatInviteLink, File, Gifts, MessageId, StarAmount, User
 
 from bot import middlewares
@@ -309,7 +309,7 @@ async def scenario(dp, db, bot, session) -> None:
         A(s="us", a="card", id=100), A(s="us", a="refs", id=100), A(s="us", a="bonus", id=100, p=1),
         A(s="us", a="rreset", id=100), A(s="us", a="gift", id=100),
         A(s="bc"), A(s="st"), A(s="st", a="goal"), A(s="st", a="setgoal", id=7), A(s="st", a="t", v="repeatable"),
-        A(s="st", a="mode"), A(s="st", a="ttl"), A(s="st", a="topup"),
+        A(s="st", a="mode"), A(s="st", a="ttl"), A(s="bal"), A(s="bal", v="gifts"),
         A(s="tx"), *[A(s="tx", a="card", v=k) for k in ("text_menu", "text_subscribe", "text_rules")],
         A(s="ad"),
     ]
@@ -336,6 +336,28 @@ async def scenario(dp, db, bot, session) -> None:
         "from": {"id": 301, "is_bot": False, "first_name": "U"}, "user_chat_id": 301, "date": int(time.time())}})
     await feed(cb_update(301, U(a="check").pack()))
     check("Мишка за друзей" in session.texts_to(301)[-1], "заявка на вступление засчитывается как подписка")
+
+    print("Пополнение баланса")
+    await feed(cb_update(ADMIN, A(s="home").pack()))
+    check("⭐ Баланс: 100 — пополнить" in str(session.screen().reply_markup), "кнопка баланса на дашборде")
+    await feed(cb_update(ADMIN, A(s="bal").pack()))
+    check("Хватит на" in session.screen().text and "Своя сумма" in str(session.screen().reply_markup),
+          "экран баланса с готовыми суммами и своей")
+    await feed(cb_update(ADMIN, A(s="bal", a="pay", id=250).pack()))
+    inv = session.by_type(SendInvoice)[-1]
+    check(inv.currency == "XTR" and inv.prices[0].amount == 250, "готовая сумма — счёт на 250 ⭐")
+    await feed(cb_update(ADMIN, A(s="bal", a="custom").pack()))
+    await feed(msg_update(ADMIN, "0"))
+    await feed(msg_update(ADMIN, "20000"))
+    check(session.by_type(SendInvoice)[-1] is inv, "некорректная сумма отклонена")
+    await feed(msg_update(ADMIN, "1 337"))
+    inv = session.by_type(SendInvoice)[-1]
+    check(inv.prices[0].amount == 1337 and inv.payload == "topup:1337", "своя сумма — счёт на 1337 ⭐")
+    await feed(msg_update(ADMIN, None, successful_payment={
+        "currency": "XTR", "total_amount": 1337, "invoice_payload": "topup:1337",
+        "telegram_payment_charge_id": "ch1", "provider_payment_charge_id": ""}))
+    check("пополнен на <b>1337</b>" in session.texts_to(ADMIN)[-1] and "К балансу" in str(session.screen().reply_markup),
+          "после оплаты — подтверждение с балансом")
 
     await feed(cb_update(ADMIN, A(s="us").pack()))
     await feed(msg_update(ADMIN, "@user101"))

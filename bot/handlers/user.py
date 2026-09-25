@@ -1,14 +1,15 @@
 import logging
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandObject, CommandStart
 from aiogram.types import CallbackQuery, ChatJoinRequest, ChatMemberUpdated, Message, PreCheckoutQuery
 from aiogram.types import InlineKeyboardButton as Btn
 from aiogram.utils.callback_answer import CallbackAnswer
 from aiosqlite import Row
 
-from bot.callbacks import U
+from bot.callbacks import A, U
 from bot.database import Database
 from bot.services.admins import AdminRegistry
 from bot.services.checks import CHECK_PREFIX, CheckService, CheckStatus
@@ -207,9 +208,18 @@ async def on_pre_checkout(query: PreCheckoutQuery) -> None:
 
 
 @service_router.message(F.successful_payment)
-async def on_payment(message: Message, admins: AdminRegistry) -> None:
+async def on_payment(message: Message, bot: Bot, admins: AdminRegistry) -> None:
     payment = message.successful_payment
-    await message.answer(f"✅ Спасибо! Баланс бота пополнен на <b>{payment.total_amount}</b> ⭐")
+    try:
+        balance = f"\nТеперь на балансе: <b>{(await bot.get_my_star_balance()).amount}</b> ⭐"
+    except TelegramAPIError:
+        balance = ""
+    markup = None
+    if admins.is_admin(message.from_user.id):
+        markup = kb([Btn(text="⭐ К балансу", callback_data=A(s="bal").pack())],
+                    [Btn(text="🛠 В админку", callback_data=A(s="home").pack())])
+    await message.answer(f"✅ Спасибо! Баланс бота пополнен на <b>{payment.total_amount}</b> ⭐{balance}",
+                         reply_markup=markup)
     if not admins.is_admin(message.from_user.id):
         await admins.notify(f"⭐ {esc(message.from_user.full_name)} пополнил баланс бота на "
                             f"{payment.total_amount} ⭐")

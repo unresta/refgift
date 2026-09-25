@@ -9,6 +9,7 @@ from aiosqlite import Row
 from bot.callbacks import A
 from bot.config import Config
 from bot.database import Database
+from bot.handlers.admin.home import star_balance, topup_button
 from bot.handlers.admin.common import Btn, Input, back, btn, drop_prompt, kb, pager, pages_count, prompt
 from bot.services.checks import CheckService
 from bot.services.gifts import GiftImages, gift_emoji
@@ -67,6 +68,7 @@ async def main_screen(bot: Bot, db: Database, settings: Settings, bot_username: 
 
     rows: list[list[Btn]] = [
         [Btn(text="📤 Создать чек", style="success", switch_inline_query="10 ")],
+        topup_button(await star_balance(bot), settings, "ck"),
         [btn(f"🎨 Баннеры подарков · {own}/{len(catalog)}", "ck", "banners", style="primary")],
         [btn("🖼 Заменить общий баннер" if has_photo else "🖼 Загрузить общий баннер", "ck", "photo"),
          btn("👁 Превью", "ck", "preview")],

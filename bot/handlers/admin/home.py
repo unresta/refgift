@@ -37,6 +37,14 @@ async def star_balance(bot: Bot) -> int | None:
         return None
 
 
+def topup_button(balance: int | None, settings: Settings, origin: str = "") -> list[Btn]:
+    """Кнопка баланса: красная, если звёзд не хватает даже на один подарок."""
+    price = max(1, settings.get_int("gift_price"))
+    low = balance is not None and balance < price
+    label = f"⭐ Баланс: {fmt_num(balance)} — пополнить" if balance is not None else "⭐ Пополнить баланс"
+    return [btn(label, "bal", v=origin, style="danger" if low else "success")]
+
+
 async def home_screen(bot: Bot, db: Database, settings: Settings, config: Config,
                       subs: SubscriptionService, broadcaster: Broadcaster):
     st = await db.stats(day_start(config), settings.goal)
@@ -76,6 +84,7 @@ async def home_screen(bot: Bot, db: Database, settings: Settings, config: Config
 
     pending = st["claims_pending"]
     markup = kb(
+        topup_button(balance, settings),
         [btn("📊 Статистика", "stats"), btn("📎 Рекламные ссылки", "lk")],
         [btn(f"🎁 Заявки · {pending}" if pending else "🎁 Заявки", "cl",
              style="success" if pending else None),

@@ -8,7 +8,7 @@ from bot.callbacks import A
 from bot.config import Config
 from bot.database import Database
 from bot.handlers.admin.common import back, btn, kb, pager, pages_count
-from bot.handlers.admin.home import star_balance
+from bot.handlers.admin.home import star_balance, topup_button
 from bot.services.rewards import RewardService
 from bot.settings import Settings
 from bot.utils import esc, fmt_dt, show, user_link
@@ -132,6 +132,7 @@ async def cb_all_confirm(call: CallbackQuery, bot: Bot, db: Database, settings: 
     await show(call, f"🚀 <b>Отправить все ожидающие заявки подарками?</b>\n\n"
                      f"Заявок: <b>{count}</b>\nНужно: ~<b>{need}</b> ⭐\nБаланс: <b>{bal}</b>{warn}", kb(
         [btn("🚀 Отправить", "cl", "all_ok", style="success")],
+        topup_button(balance, settings, "cl"),
         back("cl", text="« Отмена"),
     ))
 
