@@ -52,6 +52,10 @@ class Input(StatesGroup):
     admin_add = State()
     bc_message = State()
     bc_buttons = State()
+    ad_name = State()
+    ad_code = State()
+    ad_rename = State()
+    ad_cost = State()
 
 
 def btn(text: str, s: str, a: str = "open", id: int = 0, p: int = 0, v: str = "",

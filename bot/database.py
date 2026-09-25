@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS users (
     is_blocked      INTEGER NOT NULL DEFAULT 0,  -- пользователь заблокировал бота
     created_at      INTEGER NOT NULL,
     verified_at     INTEGER,                     -- когда впервые прошёл обязательную подписку
-    last_seen       INTEGER NOT NULL
+    last_seen       INTEGER NOT NULL,
+    ad_link_id      INTEGER                      -- рекламная ссылка, по которой пришёл
 );
 CREATE INDEX IF NOT EXISTS idx_users_referrer ON users(referrer_id);
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username COLLATE NOCASE);
@@ -70,7 +71,31 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS ad_links (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    code        TEXT    NOT NULL UNIQUE,
+    name        TEXT    NOT NULL,
+    cost        REAL    NOT NULL DEFAULT 0,
+    is_archived INTEGER NOT NULL DEFAULT 0,
+    created_by  INTEGER,
+    created_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ad_clicks (
+    link_id    INTEGER NOT NULL,
+    user_id    INTEGER NOT NULL,
+    is_new     INTEGER NOT NULL,  -- 1 — пользователь впервые запустил бота по этой ссылке
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ad_clicks_link ON ad_clicks(link_id, created_at);
 """
+
+# Колонки, добавленные после первого релиза: (таблица, колонка, определение)
+MIGRATIONS = [
+    ("users", "ad_link_id", "INTEGER"),
+]
+POST_MIGRATION_SQL = "CREATE INDEX IF NOT EXISTS idx_users_ad_link ON users(ad_link_id, created_at);"
 
 TOTAL = "(ref_count + bonus_refs)"
 
@@ -98,6 +123,11 @@ class Database:
         self._conn = await aiosqlite.connect(self.path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(SCHEMA)
+        for table, column, definition in MIGRATIONS:
+            columns = {r["name"] for r in await self.all(f"PRAGMA table_info({table})")}
+            if column not in columns:
+                await self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        await self._conn.executescript(POST_MIGRATION_SQL)
         await self._conn.commit()
 
     async def close(self) -> None:
@@ -259,8 +289,12 @@ class Database:
             row = await cur.fetchone()
         return row[0] if row else 0
 
-    async def export_users(self) -> list[aiosqlite.Row]:
-        return await self.all(f"SELECT *, {TOTAL} AS total FROM users ORDER BY created_at")
+    async def export_users(self, ad_link_id: int | None = None) -> list[aiosqlite.Row]:
+        if ad_link_id is None:
+            return await self.all(f"SELECT *, {TOTAL} AS total FROM users ORDER BY created_at")
+        return await self.all(
+            f"SELECT *, {TOTAL} AS total FROM users WHERE ad_link_id = ? ORDER BY created_at", ad_link_id
+        )
 
     # ---------- statistics ----------
     async def stats(self, day_start: int, goal: int) -> dict[str, int]:
@@ -280,10 +314,12 @@ class Database:
                 COALESCE(SUM(ref_credited), 0)                  AS credited,
                 COALESCE(SUM(referrer_id IS NOT NULL AND ref_credited = 0), 0) AS ref_pending,
                 COALESCE(SUM({TOTAL} >= ?), 0)                  AS reached_goal,
-                COALESCE(SUM(referrer_id IS NOT NULL AND created_at >= ?), 0) AS invited_today
+                COALESCE(SUM(referrer_id IS NOT NULL AND created_at >= ?), 0) AS invited_today,
+                COALESCE(SUM(ad_link_id IS NOT NULL), 0)        AS from_ads,
+                COALESCE(SUM(ad_link_id IS NOT NULL AND created_at >= ?), 0) AS from_ads_today
             FROM users
             """,
-            day_start, ts - 7 * 86400, ts - 30 * 86400, ts - 86400, goal, day_start,
+            day_start, ts - 7 * 86400, ts - 30 * 86400, ts - 86400, goal, day_start, day_start,
         )
         result = dict(row) if row else {}
         claims = await self.all("SELECT status, COALESCE(method, ''), COUNT(*) FROM claims GROUP BY 1, 2")
@@ -409,6 +445,101 @@ class Database:
 
     async def remove_admin(self, user_id: int) -> None:
         await self.run("DELETE FROM admins WHERE user_id = ?", user_id)
+
+    # ---------- рекламные ссылки ----------
+    async def create_ad_link(self, code: str, name: str, created_by: int) -> int:
+        cur = await self.conn.execute(
+            "INSERT INTO ad_links (code, name, created_by, created_at) VALUES (?, ?, ?, ?)",
+            (code, name, created_by, now()),
+        )
+        await self.conn.commit()
+        return cur.lastrowid or 0
+
+    async def get_ad_link(self, link_id: int) -> aiosqlite.Row | None:
+        return await self.one("SELECT * FROM ad_links WHERE id = ?", link_id)
+
+    async def get_ad_link_by_code(self, code: str) -> aiosqlite.Row | None:
+        return await self.one("SELECT * FROM ad_links WHERE code = ?", code)
+
+    async def list_ad_links(self, archived: bool, limit: int, offset: int) -> list[aiosqlite.Row]:
+        return await self.all(
+            "SELECT l.*, "
+            "  (SELECT COUNT(*) FROM users u WHERE u.ad_link_id = l.id) AS new_users, "
+            "  (SELECT COUNT(*) FROM users u WHERE u.ad_link_id = l.id AND u.verified_at IS NOT NULL) AS verified, "
+            "  (SELECT COUNT(*) FROM ad_clicks c WHERE c.link_id = l.id) AS clicks "
+            "FROM ad_links l WHERE l.is_archived = ? ORDER BY l.id DESC LIMIT ? OFFSET ?",
+            int(archived), limit, offset,
+        )
+
+    async def count_ad_links(self, archived: bool) -> int:
+        return await self.val("SELECT COUNT(*) FROM ad_links WHERE is_archived = ?", int(archived))
+
+    async def update_ad_link(self, link_id: int, **fields: Any) -> None:
+        allowed = {"name", "cost", "is_archived"}
+        assert set(fields) <= allowed, fields
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        await self.run(f"UPDATE ad_links SET {sets} WHERE id = ?", *fields.values(), link_id)
+
+    async def delete_ad_link(self, link_id: int) -> None:
+        await self.conn.execute("UPDATE users SET ad_link_id = NULL WHERE ad_link_id = ?", (link_id,))
+        await self.conn.execute("DELETE FROM ad_clicks WHERE link_id = ?", (link_id,))
+        await self.conn.execute("DELETE FROM ad_links WHERE id = ?", (link_id,))
+        await self.conn.commit()
+
+    async def track_ad_click(self, link_id: int, user_id: int, is_new: bool) -> None:
+        """Фиксирует переход; новому пользователю навсегда присваивает источник."""
+        await self.conn.execute(
+            "INSERT INTO ad_clicks (link_id, user_id, is_new, created_at) VALUES (?, ?, ?, ?)",
+            (link_id, user_id, int(is_new), now()),
+        )
+        if is_new:
+            await self.conn.execute(
+                "UPDATE users SET ad_link_id = ? WHERE user_id = ? AND ad_link_id IS NULL", (link_id, user_id)
+            )
+        await self.conn.commit()
+
+    async def ad_link_stats(self, link_id: int, goal: int, day_start: int) -> dict[str, int]:
+        ts = now()
+        users = await self.one(
+            f"""
+            SELECT
+                COUNT(*)                                     AS new_users,
+                COALESCE(SUM(created_at >= ?), 0)            AS new_today,
+                COALESCE(SUM(verified_at IS NOT NULL), 0)    AS verified,
+                COALESCE(SUM(ref_count > 0), 0)              AS inviters,
+                COALESCE(SUM(ref_count), 0)                  AS referrals,
+                COALESCE(SUM({TOTAL} >= ?), 0)               AS reached_goal,
+                COALESCE(SUM(rewards_claimed), 0)            AS rewards,
+                COALESCE(SUM(last_seen >= ?), 0)             AS active24,
+                COALESCE(SUM(last_seen >= ?), 0)             AS active7,
+                COALESCE(SUM(is_blocked), 0)                 AS blocked,
+                COALESCE(SUM(is_banned), 0)                  AS banned
+            FROM users WHERE ad_link_id = ?
+            """,
+            day_start, goal, ts - 86400, ts - 7 * 86400, link_id,
+        )
+        clicks = await self.one(
+            """
+            SELECT
+                COUNT(*)                                             AS clicks,
+                COUNT(DISTINCT user_id)                              AS unique_clicks,
+                COUNT(DISTINCT user_id)
+                  - COUNT(DISTINCT CASE WHEN is_new = 1 THEN user_id END) AS returning_users,
+                COALESCE(SUM(created_at >= ?), 0)                    AS clicks_today,
+                MIN(created_at)                                      AS first_click,
+                MAX(created_at)                                      AS last_click
+            FROM ad_clicks WHERE link_id = ?
+            """,
+            day_start, link_id,
+        )
+        return {**dict(users or {}), **dict(clicks or {})}
+
+    async def ad_link_daily(self, link_id: int, since: int) -> tuple[list[int], list[int]]:
+        """Метки времени новых пользователей и переходов по ссылке начиная с since."""
+        new = await self.all("SELECT created_at FROM users WHERE ad_link_id = ? AND created_at >= ?", link_id, since)
+        clicks = await self.all("SELECT created_at FROM ad_clicks WHERE link_id = ? AND created_at >= ?",
+                                link_id, since)
+        return [r[0] for r in new], [r[0] for r in clicks]
 
     # ---------- settings ----------
     async def load_settings(self) -> dict[str, str]:

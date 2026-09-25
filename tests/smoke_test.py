@@ -148,10 +148,33 @@ def check(cond: bool, label: str) -> None:
     print(f"  ✓ {label}")
 
 
+async def check_migration(tmp: str) -> None:
+    import sqlite3
+
+    from bot.database import Database
+    path = os.path.join(tmp, "old.db")
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE users (user_id INTEGER PRIMARY KEY, username TEXT, full_name TEXT NOT NULL DEFAULT '', "
+                "referrer_id INTEGER, ref_credited INTEGER NOT NULL DEFAULT 0, ref_count INTEGER NOT NULL DEFAULT 0, "
+                "bonus_refs INTEGER NOT NULL DEFAULT 0, rewards_claimed INTEGER NOT NULL DEFAULT 0, "
+                "is_banned INTEGER NOT NULL DEFAULT 0, is_blocked INTEGER NOT NULL DEFAULT 0, "
+                "created_at INTEGER NOT NULL, verified_at INTEGER, last_seen INTEGER NOT NULL)")
+    con.execute("INSERT INTO users (user_id, created_at, last_seen) VALUES (1, 0, 0)")
+    con.commit()
+    con.close()
+    db = Database(path)
+    await db.connect()
+    user = await db.get_user(1)
+    await db.close()
+    check(user is not None and user["ad_link_id"] is None, "миграция старой базы: колонка ad_link_id добавлена")
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.WARNING)
     middlewares.ThrottlingMiddleware.__init__.__defaults__ = (0.0,)
     tmp = tempfile.mkdtemp()
+    print("Миграция")
+    await check_migration(tmp)
     config = Config("0:fake", frozenset({ADMIN}), os.path.join(tmp, "t.db"), ZoneInfo("Europe/Moscow"))
     session = FakeSession()
     bot = Bot(f"{BOT_ID}:fake", session=session, default=DefaultBotProperties(parse_mode="HTML"))
@@ -299,6 +322,54 @@ async def scenario(dp, db, bot, session) -> None:
     await feed(cb_update(ADMIN, A(s="ad", a="add").pack()))
     await feed(msg_update(ADMIN, "/start"))
     check(await dp.fsm.get_context(bot, ADMIN, ADMIN).get_state() is None, "/start прерывает ввод админа")
+
+    print("Рекламные ссылки")
+    await feed(cb_update(ADMIN, A(s="lk").pack()))
+    await feed(cb_update(ADMIN, A(s="lk", a="new").pack()))
+    await feed(msg_update(ADMIN, "Канал @news, пост 25.09"))
+    await feed(msg_update(ADMIN, "bad code!"))
+    check(await db.get_ad_link_by_code("bad code!") is None, "невалидный код отклонён")
+    await feed(msg_update(ADMIN, "promo1"))
+    link = await db.get_ad_link_by_code("promo1")
+    check(link is not None and link["name"] == "Канал @news, пост 25.09", "ссылка создана с названием и кодом")
+    check("t.me/test_bot?start=ad_promo1" in session.texts_to(ADMIN)[-1], "карточка показывает ссылку")
+
+    await feed(msg_update(400, "/start ad_promo1"))
+    await feed(msg_update(400, "/start ad_promo1"))
+    await feed(msg_update(100, "/start ad_promo1"))
+    await feed(msg_update(401, "/start ad_unknown"))
+    session.members.update({(CHANNEL, 400), (-1002, 400)})
+    await feed(cb_update(400, U(a="check").pack()))
+    st = await db.ad_link_stats(link["id"], settings.goal, 0)
+    check(st["new_users"] == 1 and st["clicks"] == 3 and st["unique_clicks"] == 2 and st["returning_users"] == 1,
+          f"переходы: всего {st['clicks']}, уник. {st['unique_clicks']}, новых {st['new_users']}, "
+          f"вернувшихся {st['returning_users']}")
+    check(st["verified"] == 1, "подписка пришедших по ссылке учтена")
+    check((await db.get_user(100))["ad_link_id"] is None, "старый пользователь не переписан на рекламу")
+    check((await db.get_user(401))["ad_link_id"] is None, "неизвестный код игнорируется")
+
+    lid = link["id"]
+    await feed(cb_update(ADMIN, A(s="lk", a="cost", id=lid).pack()))
+    await feed(msg_update(ADMIN, "5 000 ₽"))
+    check((await db.get_ad_link(lid))["cost"] == 5000, "стоимость «5 000 ₽» распознана")
+    check("Подписчик: <b>5 000 ₽</b>" in session.texts_to(ADMIN)[-1], "цена подписчика посчитана")
+    await feed(cb_update(ADMIN, A(s="lk", a="rename", id=lid).pack()))
+    await feed(msg_update(ADMIN, "TikTok"))
+    check((await db.get_ad_link(lid))["name"] == "TikTok", "переименование")
+    for cb in (A(s="lk", a="card", id=lid, p=14), A(s="lk", a="card", id=lid, p=30), A(s="lk", a="csv", id=lid),
+               A(s="lk", a="arch", id=lid), A(s="lk", v="arch"), A(s="lk", a="arch", id=lid),
+               A(s="us", a="card", id=400), A(s="home"), A(s="stats")):
+        await feed(cb_update(ADMIN, cb.pack()))
+    check("Пришёл по рекламе" in session.texts_to(ADMIN)[-3], "источник виден в карточке пользователя")
+    check(session.by_type(SendDocument)[-1].document.filename.startswith("users_promo1_"), "CSV по ссылке")
+    await feed(cb_update(ADMIN, A(s="lk", a="new").pack()))
+    await feed(msg_update(ADMIN, "Случайная"))
+    await feed(cb_update(ADMIN, A(s="lk", a="rnd").pack()))
+    check(await db.count_ad_links(False) == 2, "ссылка со случайным кодом")
+    await feed(cb_update(ADMIN, A(s="lk", a="del", id=lid).pack()))
+    await feed(cb_update(ADMIN, A(s="lk", a="del_ok", id=lid).pack()))
+    check(await db.get_ad_link(lid) is None and (await db.get_user(400))["ad_link_id"] is None,
+          "удаление ссылки отвязывает пользователей")
 
     print("Рассылка")
     await feed(cb_update(ADMIN, A(s="bc").pack()))

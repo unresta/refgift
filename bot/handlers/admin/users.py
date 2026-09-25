@@ -42,6 +42,7 @@ async def card_screen(db: Database, settings: Settings, config: Config, subs: Su
     p = calc_progress(u, settings)
     credited, pending = await db.referral_counts(user_id)
     referrer = await db.get_user(u["referrer_id"]) if u["referrer_id"] else None
+    ad_link = await db.get_ad_link(u["ad_link_id"]) if u["ad_link_id"] else None
     pending_claim = await db.user_pending_claim(user_id)
     rank = await db.user_rank(user_id)
 
@@ -64,6 +65,7 @@ async def card_screen(db: Database, settings: Settings, config: Config, subs: Su
         f"✅ Подписка: {'пройдена ' + fmt_dt(u['verified_at'], config.tz) if u['verified_at'] else '❌ не пройдена'}",
         f"🤝 Пригласил: {user_link(referrer['user_id'], referrer['full_name']) if referrer else '—'}"
         + (" (засчитан)" if u["ref_credited"] else " (не засчитан)" if referrer else ""),
+        *([f"📎 Пришёл по рекламе: <b>{esc(ad_link['name'])}</b>"] if ad_link else []),
         "",
         f"👥 Друзей: <b>{p.total}</b>{bonus} · место в топе: {rank or '—'}",
         f"⏳ Не завершили подписку: <b>{pending}</b>",

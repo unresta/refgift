@@ -20,6 +20,8 @@ from bot.views import (FRIENDS_PAGE, back_to_menu, friends_screen, invite_screen
 
 log = logging.getLogger(__name__)
 
+AD_PREFIX = "ad_"
+
 router = Router(name="user")
 router.message.filter(F.chat.type == "private")
 router.callback_query.filter(F.message.chat.type == "private")
@@ -49,10 +51,14 @@ async def pass_gate(event: Message | CallbackQuery, user: Row, db: Database, set
 
 
 @router.message(CommandStart(), flags={"skip_sub": True})
-async def cmd_start(message: Message, command: CommandObject, user: Row, db: Database, settings: Settings,
-                    subs: SubscriptionService, rewards: RewardService, is_admin: bool) -> None:
+async def cmd_start(message: Message, command: CommandObject, user: Row, is_new: bool, db: Database,
+                    settings: Settings, subs: SubscriptionService, rewards: RewardService, is_admin: bool) -> None:
     args = (command.args or "").strip()
-    if args.startswith("r") and args[1:].isdigit():
+    if args.startswith(AD_PREFIX):
+        link = await db.get_ad_link_by_code(args.removeprefix(AD_PREFIX))
+        if link:
+            await db.track_ad_click(link["id"], user["user_id"], is_new)
+    elif args.startswith("r") and args[1:].isdigit():
         referrer_id = int(args[1:])
         if referrer_id != user["user_id"] and await db.get_user(referrer_id):
             await db.set_referrer(user["user_id"], referrer_id)

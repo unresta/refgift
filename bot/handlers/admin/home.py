@@ -50,6 +50,7 @@ async def home_screen(bot: Bot, db: Database, settings: Settings, config: Config
         f"👥 Пользователей: <b>{fmt_num(st['total'])}</b> (+{st['today']} сегодня)",
         f"✅ Прошли подписку: <b>{fmt_num(st['verified'])}</b>",
         f"🔗 Засчитано рефералов: <b>{fmt_num(st['credited'])}</b>",
+        f"📎 С рекламы: <b>{fmt_num(st['from_ads'])}</b> (+{st['from_ads_today']} сегодня)",
         f"🧸 Выдано наград: <b>{st['claims_sent']}</b> · ⏳ ждут: <b>{st['claims_pending']}</b>",
     ]
     if balance is not None:
@@ -75,12 +76,13 @@ async def home_screen(bot: Bot, db: Database, settings: Settings, config: Config
 
     pending = st["claims_pending"]
     markup = kb(
-        [btn("📊 Статистика", "stats"), btn(f"📢 Каналы · {len(channels)}", "ch")],
+        [btn("📊 Статистика", "stats"), btn("📎 Рекламные ссылки", "lk")],
         [btn(f"🎁 Заявки · {pending}" if pending else "🎁 Заявки", "cl",
              style="success" if pending else None),
-         btn("👥 Пользователи", "us")],
-        [btn("📨 Рассылка", "bc"), btn("⚙️ Настройки", "st")],
-        [btn("📝 Тексты", "tx"), btn("👮 Админы", "ad")],
+         btn(f"📢 Каналы · {len(channels)}", "ch")],
+        [btn("👥 Пользователи", "us"), btn("📨 Рассылка", "bc")],
+        [btn("⚙️ Настройки", "st"), btn("📝 Тексты", "tx")],
+        [btn("👮 Админы", "ad")],
         [btn("🔄 Обновить", "home", "refresh"), Btn(text="🏠 Меню бота", callback_data=U(a="menu").pack())],
     )
     return "\n".join(lines), markup
@@ -135,6 +137,7 @@ async def cb_stats(call: CallbackQuery, callback_data: A, callback_answer: Callb
         f"├ Новые: сегодня <b>+{st['today']}</b> · 7 дн. <b>+{st['week']}</b> · 30 дн. <b>+{st['month']}</b>",
         f"├ Активны за 24 ч: <b>{fmt_num(st['active24'])}</b>",
         f"├ Прошли подписку: <b>{fmt_num(st['verified'])}</b> ({percent(st['verified'], st['total'])}%)",
+        f"├ Пришли с рекламы: <b>{fmt_num(st['from_ads'])}</b> (сегодня +{st['from_ads_today']})",
         f"├ Заблокировали бота: <b>{fmt_num(st['blocked'])}</b>",
         f"└ В бане: <b>{st['banned']}</b>",
         "",
@@ -162,21 +165,23 @@ async def cb_stats(call: CallbackQuery, callback_data: A, callback_answer: Callb
     ))
 
 
-async def export_csv(call: CallbackQuery, db: Database, config: Config) -> None:
+async def export_csv(call: CallbackQuery, db: Database, config: Config, ad_link_id: int | None = None,
+                     label: str = "") -> None:
     buf = io.StringIO()
     writer = csv.writer(buf, delimiter=";")
     writer.writerow(["user_id", "username", "full_name", "referrer_id", "credited", "ref_count", "bonus_refs",
-                     "total", "rewards_claimed", "verified", "banned", "blocked", "created_at", "last_seen"])
-    for r in await db.export_users():
+                     "total", "rewards_claimed", "verified", "banned", "blocked", "created_at", "last_seen",
+                     "ad_link_id"])
+    for r in await db.export_users(ad_link_id):
         writer.writerow([
             r["user_id"], r["username"] or "", r["full_name"], r["referrer_id"] or "", r["ref_credited"],
             r["ref_count"], r["bonus_refs"], r["total"], r["rewards_claimed"],
             fmt_dt(r["verified_at"], config.tz), r["is_banned"], r["is_blocked"],
-            fmt_dt(r["created_at"], config.tz), fmt_dt(r["last_seen"], config.tz),
+            fmt_dt(r["created_at"], config.tz), fmt_dt(r["last_seen"], config.tz), r["ad_link_id"] or "",
         ])
     data = buf.getvalue().encode("utf-8-sig")  # BOM — чтобы Excel корректно открыл кириллицу
     stamp = datetime.now(config.tz).strftime("%Y-%m-%d_%H-%M")
     await call.message.answer_document(
-        BufferedInputFile(data, filename=f"users_{stamp}.csv"),
-        caption="📥 Выгрузка пользователей (разделитель «;»)",
+        BufferedInputFile(data, filename=f"users_{label + '_' if label else ''}{stamp}.csv"),
+        caption=f"📥 Выгрузка пользователей{' по ссылке ' + esc(label) if label else ''} (разделитель «;»)",
     )
