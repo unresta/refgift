@@ -1,0 +1,13 @@
+.venv
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+data
+tests
+**/__pycache__
+.ruff_cache
+*.md
+docker-compose.yml
+Dockerfile

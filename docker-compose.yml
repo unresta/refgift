@@ -1,0 +1,19 @@
+services:
+  bot:
+    build: .
+    image: refgift-bot
+    container_name: refgift-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_PATH: /app/data/bot.db
+    volumes:
+      - bot-data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  bot-data:

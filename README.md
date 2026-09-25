@@ -14,6 +14,18 @@ cp .env.example .env        # впишите BOT_TOKEN и свой ID в ADMIN_I
 python -m bot
 ```
 
+### Docker
+
+```bash
+cp .env.example .env        # впишите BOT_TOKEN и ADMIN_IDS
+docker compose up -d --build
+docker compose logs -f      # логи
+```
+
+База SQLite лежит в именованном томе `bot-data` и переживает пересборку контейнера.
+Обновление: `git pull && docker compose up -d --build`.
+Бэкап базы: `docker compose cp bot:/app/data/bot.db ./bot.db`.
+
 Бота нужно добавить **администратором** во все каналы из обязательной подписки, иначе он не сможет проверить подписку.
 
 ## Пользователь
