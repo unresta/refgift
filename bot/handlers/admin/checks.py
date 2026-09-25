@@ -53,7 +53,7 @@ async def main_screen(bot: Bot, db: Database, settings: Settings, bot_username: 
         lines.append("\n⚠️ <b>Inline-режим выключен.</b> Включите: @BotFather → /setinline → выберите бота.")
     if not total:
         lines.append("\n💡 Чтобы отправленные чеки сразу появлялись здесь и помечались «закончился» в чате, "
-                     "включите @BotFather → /setinlinefeedback → 100%. Без этого чек появится в списке "
+                     "включите @BotFather → /setinlinefeedback → Enabled. Без этого чек появится в списке "
                      "после первой активации.")
 
     rows: list[list[Btn]] = [
