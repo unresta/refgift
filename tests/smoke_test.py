@@ -503,6 +503,37 @@ async def scenario(dp, db, bot, session) -> None:
     check(settings.get("check_photo").startswith("photo"), "картинка файлом PNG перезалита как фото")
     await gift_images.wait()
 
+    print("Баннеры подарков")
+    for cb in (A(s="ck"), A(s="ck", a="banners"), A(s="ck", a="banner", v="g_rose")):
+        await feed(cb_update(ADMIN, cb.pack()))
+    check("Своих: <b>0</b> из 2" in [t for t in session.texts_to(ADMIN) if "Баннеры подарков</b>" in t][-1],
+          "список подарков для баннеров")
+    await feed(cb_update(ADMIN, A(s="ck", a="bn_up", v="g_rose").pack()))
+    await feed(msg_update(ADMIN, None, photo=[{"file_id": "rose_banner", "file_unique_id": "r",
+                                               "width": 1280, "height": 720}]))
+    check(await db.get_gift_banner("g_rose") == "rose_banner", "свой баннер для 🌹 сохранён")
+
+    await feed(inline_update(ADMIN, "2"))
+    res = {r.title.split()[0]: r for r in session.by_type(AnswerInlineQuery)[-1].results}
+    check(res["🌹"].photo_file_id == "rose_banner", "у 🌹 в inline свой баннер")
+    check(res["🧸"].photo_file_id not in ("rose_banner", settings.get("check_photo")),
+          "у 🧸 — общий баннер со значком")
+
+    await feed(cb_update(ADMIN, A(s="ck", a="nophoto").pack()))
+    await feed(inline_update(ADMIN, "2"))
+    res = {r.title.split()[0]: r for r in session.by_type(AnswerInlineQuery)[-1].results}
+    check(type(res["🌹"]).__name__ == "InlineQueryResultCachedPhoto"
+          and type(res["🧸"]).__name__ == "InlineQueryResultArticle",
+          "без общего баннера: 🌹 с баннером, 🧸 текстом")
+    rose2 = await db.get_check(int(res["🌹"].id.removeprefix("chk:")))
+    bear2 = await db.get_check(int(res["🧸"].id.removeprefix("chk:")))
+    check(rose2["with_photo"] == 1 and bear2["with_photo"] == 0, "чек помнит, с картинкой ли он")
+
+    await feed(cb_update(ADMIN, A(s="ck", a="bn_view", v="g_rose").pack()))
+    check(session.by_type(SendPhoto)[-1].photo == "rose_banner", "превью чека с баннером подарка")
+    await feed(cb_update(ADMIN, A(s="ck", a="bn_del", v="g_rose").pack()))
+    check(await db.get_gift_banner("g_rose") is None, "свой баннер убран")
+
     await feed(inline_update(100, ""))
     res = session.by_type(AnswerInlineQuery)[-1].results
     check(len(res) == 1 and "start=r100" in res[0].input_message_content.message_text,

@@ -57,6 +57,7 @@ class Input(StatesGroup):
     ad_rename = State()
     ad_cost = State()
     check_photo = State()
+    gift_banner = State()
 
 
 def btn(text: str, s: str, a: str = "open", id: int = 0, p: int = 0, v: str = "",

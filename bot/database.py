@@ -117,6 +117,14 @@ CREATE TABLE IF NOT EXISTS gift_images (
     PRIMARY KEY (base_file_id, gift_id)
 );
 
+CREATE TABLE IF NOT EXISTS gift_banners (
+    gift_id    TEXT    PRIMARY KEY,  -- свой баннер чека для конкретного подарка
+    file_id    TEXT    NOT NULL,
+    gift_emoji TEXT,
+    gift_price INTEGER,
+    updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS check_activations (
     check_id   INTEGER NOT NULL,
     user_id    INTEGER NOT NULL,
@@ -700,6 +708,21 @@ class Database:
     async def save_gift_image(self, base_file_id: str, gift_id: str, file_id: str) -> None:
         await self.run("INSERT OR REPLACE INTO gift_images (base_file_id, gift_id, file_id) VALUES (?, ?, ?)",
                        base_file_id, gift_id, file_id)
+
+    async def get_gift_banner(self, gift_id: str) -> str | None:
+        return await self.val("SELECT file_id FROM gift_banners WHERE gift_id = ?", gift_id, default=None)
+
+    async def set_gift_banner(self, gift_id: str, file_id: str, emoji: str, price: int) -> None:
+        await self.run(
+            "INSERT OR REPLACE INTO gift_banners (gift_id, file_id, gift_emoji, gift_price, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)", gift_id, file_id, emoji, price, now(),
+        )
+
+    async def delete_gift_banner(self, gift_id: str) -> None:
+        await self.run("DELETE FROM gift_banners WHERE gift_id = ?", gift_id)
+
+    async def gift_banners(self) -> list[aiosqlite.Row]:
+        return await self.all("SELECT * FROM gift_banners ORDER BY gift_price, gift_id")
 
     async def set_pending_check(self, user_id: int, code: str | None) -> None:
         await self.run("UPDATE users SET pending_check = ? WHERE user_id = ?", code, user_id)

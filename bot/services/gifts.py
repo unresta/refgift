@@ -108,7 +108,13 @@ class GiftImages:
         self._tasks: set[asyncio.Task] = set()
 
     async def file_id(self, gift: Gift) -> str | None:
-        """Готовая картинка для подарка; если её ещё нет — ставит генерацию в фон и отдаёт базовую."""
+        """Картинка чека для подарка: свой баннер → общий баннер со значком подарка → None (текстовый чек).
+
+        Если вариант общего баннера ещё не готов — ставит генерацию в фон и пока отдаёт общий баннер.
+        """
+        banner = await self.db.get_gift_banner(gift.id)
+        if banner:
+            return banner
         base = self.settings.get("check_photo")
         if not base:
             return None
@@ -133,7 +139,8 @@ class GiftImages:
             return
         for gift in gifts if gifts is not None else await self.catalog.gifts():
             key = (base, gift.id)
-            if key in self._running or await self.db.get_gift_image(base, gift.id):
+            if (key in self._running or await self.db.get_gift_image(base, gift.id)
+                    or await self.db.get_gift_banner(gift.id)):
                 continue
             self._running.add(key)
             try:

@@ -81,7 +81,7 @@ class CheckService:
 
     # ---------- создание ----------
     async def get_or_create_draft(self, admin_id: int, total: int, caption: str | None, gift: Gift) -> Row:
-        with_photo = bool(self.settings.get("check_photo"))
+        with_photo = bool(self.settings.get("check_photo") or await self.db.get_gift_banner(gift.id))
         draft = await self.db.find_draft_check(admin_id, total, caption, with_photo, gift.id)
         if draft:
             return await self.db.get_check(draft["id"])
