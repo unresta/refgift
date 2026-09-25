@@ -51,7 +51,8 @@ async def pass_gate(event: Message | CallbackQuery, user_id: int, db: Database, 
     if user["pending_check"]:
         act = await checks.activate(user_id, user["pending_check"])  # внутри — своя проверка подписки
         if act.status is CheckStatus.NEED_SUB:
-            await show(event, *subscribe_screen(settings, user["full_name"], act.missing, for_check=True))
+            await show(event, *subscribe_screen(settings, user["full_name"], act.missing,
+                                                for_check=act.available))
             return act.missing
         await show(event, *activation_screen(act, settings))
         return []

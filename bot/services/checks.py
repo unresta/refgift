@@ -35,6 +35,7 @@ class Activation:
     status: CheckStatus
     check: Row | None = None
     missing: list[Row] = field(default_factory=list)
+    available: bool = False  # чек ещё можно получить (для текста экрана подписки)
 
 
 def _get(row: Row | dict, key: str):
@@ -97,6 +98,17 @@ class CheckService:
     # ---------- активация ----------
     async def activate(self, user_id: int, code: str) -> Activation:
         check = await self.db.get_check_by_code(code)
+
+        # Подписка проверяется первой и всегда заново, без кэша — даже если чек закончился или не найден:
+        # по ссылке чека человек в любом случае сначала подписывается на каналы.
+        missing = await self.subs.missing(user_id, use_cache=False)
+        if missing:
+            await self.db.set_pending_check(user_id, code)
+            available = bool(check and check["is_active"] and check["used"] < check["total"]
+                             and not await self.db.has_activated(check["id"], user_id))
+            return Activation(CheckStatus.NEED_SUB, check, missing, available)
+        await self.rewards.complete_verification(user_id)
+
         if not check:
             await self.db.set_pending_check(user_id, None)
             return Activation(CheckStatus.NOT_FOUND)
@@ -109,13 +121,6 @@ class CheckService:
         if check["used"] >= check["total"]:
             await self.db.set_pending_check(user_id, None)
             return Activation(CheckStatus.EXHAUSTED, check)
-
-        # Подписку проверяем всегда заново, без кэша — прямо перед активацией.
-        missing = await self.subs.missing(user_id, use_cache=False)
-        if missing:
-            await self.db.set_pending_check(user_id, code)
-            return Activation(CheckStatus.NEED_SUB, check, missing)
-        await self.rewards.complete_verification(user_id)
 
         activated = await self.db.try_activate_check(check["id"], user_id)
         await self.db.set_pending_check(user_id, None)

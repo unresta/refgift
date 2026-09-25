@@ -475,6 +475,18 @@ async def scenario(dp, db, bot, session) -> None:
     check("уже разобрали" in session.texts_to(503)[-1] and (await db.get_check(bear["id"]))["used"] == 3,
           "лимит активаций соблюдается")
 
+    gifts_before = len(session.by_type(SendGift))
+    await feed(msg_update(506, f"/start c_{code}"))
+    check("Я подписался" in str(session.screen().reply_markup) and "по чеку" not in session.texts_to(506)[-1],
+          "закончившийся чек без подписки — просит подписаться, без обещания подарка")
+    session.members.update({(CHANNEL, 506), (-1002, 506)})
+    await feed(cb_update(506, U(a="check").pack()))
+    check("уже разобрали" in session.texts_to(506)[-1] and len(session.by_type(SendGift)) == gifts_before
+          and (await db.get_user(506))["verified_at"] is not None,
+          "после подписки — «уже разобрали», подписка засчитана, подарок не выдан")
+    await feed(msg_update(507, "/start c_nonexistent"))
+    check("Я подписался" in str(session.screen().reply_markup), "несуществующий чек без подписки — тоже просит подписаться")
+
     await settings.set("reward_mode", "manual")
     await feed(msg_update(503, f"/start c_{rose['code']}"))
     claim = (await db.list_claims("pending", 10, 0))[0]
@@ -483,9 +495,9 @@ async def scenario(dp, db, bot, session) -> None:
     check(session.by_type(SendGift)[-1].gift_id == "g_rose", "админ выдал именно подарок из чека 🌹")
     await settings.set("reward_mode", "auto")
 
+    session.members.update({(CHANNEL, 504), (-1002, 504)})
     await feed(msg_update(504, "/start c_nonexistent"))
-    check("не найден" in session.texts_to(504)[-1] or "Я подписался" in str(session.screen().reply_markup),
-          "несуществующий чек")
+    check("не найден" in session.texts_to(504)[-1], "несуществующий чек у подписанного — «не найден»")
 
     for cb in (A(s="ck"), A(s="ck", a="card", id=bear["id"]), A(s="ck", a="acts", id=bear["id"]),
                A(s="ck", a="preview"), A(s="ck", a="toggle", id=rose["id"]), A(s="ck", a="toggle", id=rose["id"]),
