@@ -70,7 +70,13 @@ docker compose logs -f      # логи
 - Подарок отправляется сразу. Если звёзд у бота не хватило — выигрыш попадает в «🎁 Заявки», где его можно отправить позже или вернуть игроку звёзды.
 - Кейсы, призы и шансы настраиваются в `/admin` → «🎰 Рулетка». Шанс = вес приза / сумма весов, поэтому сумма не обязана быть ровно 100.
 
-**Запуск.** Telegram открывает мини-апп только по HTTPS:
+**Запуск через Cloudflare Tunnel (проще всего, порты открывать не нужно):**
+1. Домен добавлен в Cloudflare. Zero Trust → Networks → Tunnels → Create a tunnel → Cloudflared → скопируйте токен.
+2. В туннеле Public Hostname: поддомен (например `gifts`), домен, Service `HTTP` → `bot:8080`.
+3. В `.env`: `TUNNEL_TOKEN=<токен>` и `WEBAPP_URL=https://gifts.example.com`.
+4. `docker compose --profile tunnel up -d --build`.
+
+**Или через свой сервер с Caddy.** Telegram открывает мини-апп только по HTTPS:
 1. Направьте домен (например `gifts.example.com`) на сервер, откройте порты 80 и 443.
 2. В `.env`: `DOMAIN=gifts.example.com` и `WEBAPP_URL=https://gifts.example.com`.
 3. `docker compose --profile https up -d --build` — Caddy сам выпустит сертификат и проксирует на бота.

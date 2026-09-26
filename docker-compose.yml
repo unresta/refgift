@@ -36,6 +36,18 @@ services:
     depends_on:
       - bot
 
+  # Cloudflare Tunnel — HTTPS без открытых портов и сертификатов: docker compose --profile tunnel up -d
+  # Нужен TUNNEL_TOKEN в .env; в панели Cloudflare у туннеля Public Hostname → Service: http://bot:8080
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    depends_on:
+      - bot
+
 volumes:
   bot-data:
   caddy-data:
