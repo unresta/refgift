@@ -84,6 +84,7 @@ async def main() -> None:
     dp["gift_images"].schedule()  # догенерировать картинки чеков для новых подарков
     dp["reminders"].start()
     await dp["roulette"].seed_defaults()
+    await dp["roulette"].recover()  # выигрыши, оплаченные до перезапуска
 
     runner = web.AppRunner(create_app(dp["web"]), access_log=None)
     await runner.setup()

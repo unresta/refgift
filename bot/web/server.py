@@ -173,6 +173,17 @@ async def api_spin_status(request: web.Request) -> web.Response:
     return web.json_response({"status": spin["status"], "prize": await spin_prize_json(ctx, spin)})
 
 
+async def api_spin_reveal(request: web.Request) -> web.Response:
+    """Рулетка остановилась на призе — теперь отправляем подарок (не раньше, чтобы сохранить интригу)."""
+    ctx = ctx_of(request)
+    spin = await ctx.db.get_spin(int(request.match_info["spin_id"]))
+    if not spin or spin["user_id"] != request["user"]["user_id"]:
+        return error(404, "spin", "Прокрутка не найдена")
+    if spin["status"] == "paid":
+        spin = await ctx.roulette.deliver(spin["id"]) or spin
+    return web.json_response({"status": spin["status"], "prize": await spin_prize_json(ctx, spin)})
+
+
 async def api_demo(request: web.Request) -> web.Response:
     ctx = ctx_of(request)
     if not ctx.settings.flag("roulette_demo"):
@@ -232,6 +243,7 @@ def create_app(ctx: WebContext) -> web.Application:
     app.router.add_post("/api/check_sub", api_check_sub)
     app.router.add_post("/api/spin", api_spin)
     app.router.add_get("/api/spin/{spin_id:\\d+}", api_spin_status)
+    app.router.add_post("/api/spin/{spin_id:\\d+}/reveal", api_spin_reveal)
     app.router.add_post("/api/demo", api_demo)
     app.router.add_get("/api/top", api_top)
     app.router.add_get("/api/profile", api_profile)

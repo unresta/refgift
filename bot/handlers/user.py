@@ -6,7 +6,6 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandObject, CommandStart
 from aiogram.types import CallbackQuery, ChatJoinRequest, ChatMemberUpdated, Message, PreCheckoutQuery
 from aiogram.types import InlineKeyboardButton as Btn
-from aiogram.types import WebAppInfo
 from aiogram.utils.callback_answer import CallbackAnswer
 from aiosqlite import Row
 
@@ -214,23 +213,12 @@ async def on_pre_checkout(query: PreCheckoutQuery, roulette: RouletteService) ->
 
 
 @service_router.message(F.successful_payment, F.successful_payment.invoice_payload.startswith(SPIN_PREFIX))
-async def on_spin_payment(message: Message, roulette: RouletteService, settings: Settings) -> None:
-    """Оплачена прокрутка рулетки: приз разыгрывается и отправляется, мини-апп покажет анимацию."""
+async def on_spin_payment(message: Message, roulette: RouletteService) -> None:
+    """Оплачена прокрутка: приз разыгран, но подарок и сообщение о нём придут после остановки рулетки."""
     payment = message.successful_payment
     spin = await roulette.on_paid(message.from_user.id, payment.invoice_payload, payment.telegram_payment_charge_id)
-    if not spin:
-        return
-    if spin["status"] == "refunded":
-        text = "↩️ Не удалось провести прокрутку — звёзды вернулись на ваш счёт."
-    else:
-        where = ("уже в вашем профиле Telegram 🎉" if spin["status"] == "sent"
-                 else "будет отправлен в ближайшее время — пришлём уведомление.")
-        text = (f"🎰 <b>Рулетка «{esc(spin['case_name'])}»</b>\n\n"
-                f"Выпал {spin['gift_emoji']} за <b>{spin['gift_price']}</b> ⭐ — подарок {where}")
-    markup = None
-    if settings.webapp_url:
-        markup = kb([Btn(text="🎰 Крутить ещё", web_app=WebAppInfo(url=settings.webapp_url))])
-    await message.answer(text, reply_markup=markup)
+    if spin and spin["status"] == "refunded":
+        await message.answer("↩️ Не удалось провести прокрутку — звёзды вернулись на ваш счёт.")
 
 
 @service_router.message(F.successful_payment)

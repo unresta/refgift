@@ -1,11 +1,12 @@
 """Рулетка подарков: платная прокрутка за звёзды, приз определяется на сервере в момент оплаты."""
+import asyncio
 import logging
 import secrets
 from dataclasses import dataclass
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import LabeledPrice
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, WebAppInfo
 from aiosqlite import Row
 
 from bot.database import Database
@@ -18,6 +19,7 @@ from bot.utils import esc
 log = logging.getLogger(__name__)
 
 SPIN_PREFIX = "spin:"
+REVEAL_TIMEOUT = 30.0  # секунд: если мини-апп закрыли посреди прокрутки, подарок уйдёт сам
 _random = secrets.SystemRandom()
 
 # Кейсы по умолчанию (как на макете). Подарки ищутся в каталоге по эмодзи и цене.
@@ -62,6 +64,7 @@ class RouletteService:
         self.rewards = rewards
         self.catalog = catalog
         self.admins = admins
+        self._tasks: set[asyncio.Task] = set()
 
     @property
     def enabled(self) -> bool:
@@ -134,15 +137,58 @@ class RouletteService:
         if not await self.db.mark_spin_paid(spin["id"], charge_id, prize):
             return await self.db.get_spin(spin["id"])  # уже обработан
 
-        user = await self.db.get_user(user_id)
-        if user is None:
-            return await self.db.get_spin(spin["id"])
-        result = await self.rewards.grant(
-            user, origin=f"🎰 рулетка «{esc(spin['case_name'])}»", gift_id=prize["gift_id"], spin_id=spin["id"],
-            auto=True,
-        )
-        await self.db.set_spin_status(spin["id"], "sent" if result is ClaimResult.SENT else "pending")
+        # Приз уже определён, но отправляем его после остановки рулетки — чтобы не убить интригу.
+        # Мини-апп вызовет deliver() сам; если его закрыли, сработает таймаут.
+        self._schedule_delivery(spin["id"], REVEAL_TIMEOUT)
         return await self.db.get_spin(spin["id"])
+
+    # ---------- выдача выигрыша ----------
+    def _schedule_delivery(self, spin_id: int, delay: float) -> None:
+        task = asyncio.create_task(self._deliver_later(spin_id, delay))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _deliver_later(self, spin_id: int, delay: float) -> None:
+        await asyncio.sleep(delay)
+        try:
+            await self.deliver(spin_id)
+        except Exception:
+            log.exception("Не удалось выдать выигрыш за спин %s", spin_id)
+
+    async def recover(self) -> None:
+        """После перезапуска: выдать выигрыши, оплаченные, но ещё не отправленные."""
+        for spin_id in await self.db.undelivered_spin_ids():
+            self._schedule_delivery(spin_id, 0)
+
+    async def deliver(self, spin_id: int) -> Row | None:
+        """Отправляет выигрыш и пишет о нём в чат. Идемпотентно: второй вызов ничего не делает."""
+        if not await self.db.claim_spin_delivery(spin_id):
+            return await self.db.get_spin(spin_id)
+        spin = await self.db.get_spin(spin_id)
+        user = await self.db.get_user(spin["user_id"]) if spin else None
+        if spin is None or user is None:
+            return spin
+        result = await self.rewards.grant(
+            user, origin=f"🎰 рулетка «{esc(spin['case_name'])}»", gift_id=spin["gift_id"], spin_id=spin_id, auto=True,
+        )
+        status = "sent" if result is ClaimResult.SENT else "pending"
+        await self.db.set_spin_status(spin_id, status)
+        await self._notify_chat(spin, status)
+        return await self.db.get_spin(spin_id)
+
+    async def _notify_chat(self, spin: Row, status: str) -> None:
+        where = ("уже в вашем профиле Telegram 🎉" if status == "sent"
+                 else "будет отправлен в ближайшее время — пришлём уведомление.")
+        text = (f"🎰 <b>Рулетка «{esc(spin['case_name'])}»</b>\n\n"
+                f"Выпал {spin['gift_emoji']} за <b>{spin['gift_price']}</b> ⭐ — подарок {where}")
+        markup = None
+        if self.settings.webapp_url:
+            markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                text="🎰 Крутить ещё", web_app=WebAppInfo(url=self.settings.webapp_url))]])
+        try:
+            await self.bot.send_message(spin["user_id"], text, reply_markup=markup)
+        except TelegramAPIError:
+            pass
 
     async def refund_claim(self, claim_id: int, admin_id: int) -> tuple[bool, str]:
         """Отмена выигрыша из очереди заявок: возвращаем пользователю звёзды за прокрутку."""

@@ -292,7 +292,10 @@
       setLoading(false);
       if (res.status === 'refunded') { alert('Звёзды вернулись на ваш счёт — попробуйте ещё раз.'); return; }
       await spinTo(res.prize);
-      showWin(res.prize, res.status);
+      // Подарок отправляется только сейчас — когда рулетка уже остановилась.
+      let final = res;
+      try { final = await api(`/api/spin/${spinId}/reveal`, {}); } catch (_) { final = { status: 'pending' }; }
+      showWin(res.prize, final.status);
     } catch (err) {
       if (err.code === 'need_sub') { await refreshSub(); showSubscribe(); } else alert(err.message);
     } finally {
@@ -446,7 +449,10 @@
 
   // ---------- профиль ----------
   let profileLoaded = false;
-  const STATUS = { sent: ['sent', 'Получен'], pending: ['pending', 'В пути'], paid: ['pending', 'В пути'], refunded: ['refunded', 'Возврат'] };
+  const STATUS = {
+    sent: ['sent', 'Получен'], pending: ['pending', 'В пути'], paid: ['pending', 'В пути'],
+    delivering: ['pending', 'В пути'], refunded: ['refunded', 'Возврат'],
+  };
 
   async function loadProfile() {
     const user = state.user;

@@ -690,6 +690,7 @@ async def scenario(dp, db, bot, session) -> None:
     print("Рулетка (мини-апп)")
     from aiohttp.test_utils import TestClient, TestServer
 
+    import bot.services.roulette as roulette_mod
     import bot.web.server as server_mod
     from bot.web.server import create_app
     roulette = dp["roulette"]
@@ -748,14 +749,25 @@ async def scenario(dp, db, bot, session) -> None:
         check(await pre_checkout(700, 25) and not await pre_checkout(700, 1) and not await pre_checkout(701, 25),
               "pre_checkout: верная сумма и владелец — ок, иначе отказ")
 
+        chat_before = len(session.texts_to(700))
         await feed(payment_update(700, payload, 25, "charge_1"))
         st = await (await client.get(f"/api/spin/{spin['spin_id']}", headers=auth(700))).json()
+        check(st["status"] == "paid" and st["prize"] and len(session.by_type(SendGift)) == gifts_before
+              and len(session.texts_to(700)) == chat_before,
+              "после оплаты приз известен, но подарок и сообщение ещё не отправлены (крутится рулетка)")
+        await feed(payment_update(700, payload, 25, "charge_1"))
+        r = await client.post(f"/api/spin/{spin['spin_id']}/reveal", json={}, headers=auth(701))
+        check(r.status == 404, "чужой спин не раскрыть")
+        st = await (await client.post(f"/api/spin/{spin['spin_id']}/reveal", json={}, headers=auth(700))).json()
         gift = session.by_type(SendGift)[-1]
         check(st["status"] == "sent" and gift.user_id == 700 and gift.gift_id in ("g_rose", "g_bear")
-              and st["prize"]["gift_id"] == gift.gift_id, f"оплата → выпал и отправлен {st['prize']['emoji']}")
-        check("Рулетка «Все»" in session.texts_to(700)[-1], "в чат пришло сообщение о выигрыше")
-        await feed(payment_update(700, payload, 25, "charge_1"))
-        check(len(session.by_type(SendGift)) == gifts_before + 1, "повторное уведомление об оплате не выдаёт второй приз")
+              and st["prize"]["gift_id"] == gift.gift_id,
+              f"рулетка остановилась → отправлен {st['prize']['emoji']}")
+        check("Рулетка «Все»" in session.texts_to(700)[-1], "в чат пришло сообщение о выигрыше — после прокрутки")
+        await client.post(f"/api/spin/{spin['spin_id']}/reveal", json={}, headers=auth(700))
+        await roulette.deliver(spin["spin_id"])
+        check(len(session.by_type(SendGift)) == gifts_before + 1,
+              "повторная оплата/раскрытие/таймаут не выдают второй приз")
         r = await client.get(f"/api/spin/{spin['spin_id']}", headers=auth(701))
         check(r.status == 404, "чужой спин не виден")
 
@@ -774,7 +786,10 @@ async def scenario(dp, db, bot, session) -> None:
         session.gift_error = "BALANCE_TOO_LOW"
         server_mod._last_invoice.clear()
         spin2 = await (await client.post("/api/spin", json={"case_id": all_case["id"]}, headers=auth(700))).json()
+        roulette_mod.REVEAL_TIMEOUT = 0.2  # мини-апп закрыли посреди прокрутки — сработает таймаут
         await feed(payment_update(700, f"spin:{spin2['spin_id']}", 25, "charge_2"))
+        await asyncio.sleep(0.5)
+        roulette_mod.REVEAL_TIMEOUT = 30.0
         session.gift_error = None
         check((await db.get_spin(spin2["spin_id"]))["status"] == "pending", "нет звёзд у бота — выигрыш в очереди")
         claim = (await db.list_claims("pending", 10, 0))[0]
@@ -785,6 +800,16 @@ async def scenario(dp, db, bot, session) -> None:
         refund = session.by_type(RefundStarPayment)[-1]
         check(refund.telegram_payment_charge_id == "charge_2"
               and (await db.get_spin(spin2["spin_id"]))["status"] == "refunded", "звёзды возвращены")
+
+        server_mod._last_invoice.clear()
+        spin3 = await (await client.post("/api/spin", json={"case_id": all_case["id"]}, headers=auth(700))).json()
+        await feed(payment_update(700, f"spin:{spin3['spin_id']}", 25, "charge_3"))
+        for task in list(roulette._tasks):
+            task.cancel()  # имитация перезапуска: отложенная выдача потерялась
+        check((await db.get_spin(spin3["spin_id"]))["status"] == "paid", "перезапуск между оплатой и выдачей")
+        await roulette.recover()
+        await asyncio.sleep(0.1)
+        check((await db.get_spin(spin3["spin_id"]))["status"] == "sent", "после перезапуска выигрыш доотправлен")
 
         print("  — админка рулетки")
         for cb in (A(s="rl"), A(s="rl", a="case", id=all_case["id"]), A(s="rl", a="add", id=all_case["id"])):

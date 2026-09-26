@@ -159,7 +159,7 @@ CREATE TABLE IF NOT EXISTS spins (
     case_id    INTEGER NOT NULL,
     case_name  TEXT,
     price      INTEGER NOT NULL,
-    status     TEXT    NOT NULL,           -- created | paid | sent | pending | refunded
+    status     TEXT    NOT NULL,           -- created | paid | delivering | sent | pending | refunded
     gift_id    TEXT,
     gift_emoji TEXT,
     gift_price INTEGER,
@@ -890,6 +890,15 @@ class Database:
             charge_id, now(), prize["gift_id"], prize["gift_emoji"], prize["gift_price"], spin_id,
         ))
 
+    async def claim_spin_delivery(self, spin_id: int) -> bool:
+        """paid → delivering атомарно: подарок за прокрутку отправится ровно один раз."""
+        return bool(await self.run(
+            "UPDATE spins SET status = 'delivering' WHERE id = ? AND status = 'paid'", spin_id
+        ))
+
+    async def undelivered_spin_ids(self) -> list[int]:
+        return [r[0] for r in await self.all("SELECT id FROM spins WHERE status = 'paid' ORDER BY id")]
+
     async def set_spin_status(self, spin_id: int, status: str) -> None:
         await self.run("UPDATE spins SET status = ? WHERE id = ?", status, spin_id)
 
@@ -919,7 +928,7 @@ class Database:
             "SELECT case_id, case_name, COUNT(*) AS spins, COUNT(DISTINCT user_id) AS players, "
             "COALESCE(SUM(CASE WHEN status != 'refunded' THEN price END), 0) AS revenue, "
             "COALESCE(SUM(CASE WHEN status = 'sent' THEN gift_price END), 0) AS paid_out, "
-            "COALESCE(SUM(CASE WHEN status IN ('pending', 'paid') THEN gift_price END), 0) AS owed, "
+            "COALESCE(SUM(CASE WHEN status IN ('pending', 'paid', 'delivering') THEN gift_price END), 0) AS owed, "
             "COALESCE(SUM(status = 'pending'), 0) AS pending, COALESCE(SUM(status = 'refunded'), 0) AS refunded "
             "FROM spins WHERE paid_at IS NOT NULL AND paid_at >= ? GROUP BY case_id ORDER BY revenue DESC",
             since,
