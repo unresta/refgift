@@ -701,6 +701,12 @@ async def scenario(dp, db, bot, session) -> None:
     all_case = cases[0]
     check({p["gift_emoji"] for p in await db.roulette_prizes(all_case["id"])} == {"🌹", "🧸"},
           "призы подобраны из каталога по эмодзи и цене")
+    for c in cases:
+        prizes = await db.roulette_prizes(c["id"])
+        top_weight = max(p["weight"] for p in prizes)
+        check(all(p["weight"] == top_weight for p in prizes if p["gift_price"] == 15)
+              and all(p["weight"] < top_weight for p in prizes if p["gift_price"] != 15),
+              f"«{c['name']}»: у подарков за 15 ⭐ самый высокий шанс")
 
     client = TestClient(TestServer(create_app(dp["web"])))
     await client.start_server()
@@ -839,6 +845,25 @@ async def scenario(dp, db, bot, session) -> None:
         r = await client.post("/api/init", json={}, headers=auth(700))
         check(r.status == 503 and not await pre_checkout(700, 25), "рулетка выключена — мини-апп и оплата закрыты")
         await feed(cb_update(ADMIN, A(s="rl", a="t", v="roulette_enabled").pack()))
+
+        print("  — обновление шансов в уже созданных кейсах")
+        await settings.set("roulette_defaults_version", "1")
+        untouched = await db.create_roulette_case("Все", 25)
+        await db.add_roulette_prize(untouched, "g_bear", "🧸", 15, 21.37)
+        await db.add_roulette_prize(untouched, "g_rose", "🌹", 25, 25)
+        custom = await db.create_roulette_case("Романтика", 42)
+        await db.add_roulette_prize(custom, "g_bear", "🧸", 15, 11.05)
+        await db.add_roulette_prize(custom, "g_rose", "🌹", 25, 50)  # админ поменял шанс
+        await roulette.upgrade_default_weights()
+        w_untouched = {p["gift_emoji"]: p["weight"] for p in await db.roulette_prizes(untouched)}
+        w_custom = {p["gift_emoji"]: p["weight"] for p in await db.roulette_prizes(custom)}
+        check(w_untouched == {"🧸": 33, "🌹": 14}, "нетронутый кейс получил новые шансы")
+        check(w_custom == {"🧸": 11.05, "🌹": 50}, "кейс с ручными шансами не тронут")
+        await db.set_prize_weight((await db.roulette_prizes(untouched))[0]["id"], 21.37)
+        await roulette.upgrade_default_weights()
+        check((await db.roulette_prizes(untouched))[0]["weight"] == 21.37, "миграция выполняется один раз")
+        await db.delete_roulette_case(untouched)
+        await db.delete_roulette_case(custom)
 
         await feed(cb_update(100, U(a="menu").pack()))
         check("web_app" in str(session.screen().reply_markup.model_dump(exclude_none=True)),

@@ -22,14 +22,21 @@ SPIN_PREFIX = "spin:"
 REVEAL_TIMEOUT = 30.0  # секунд: если мини-апп закрыли посреди прокрутки, подарок уйдёт сам
 _random = secrets.SystemRandom()
 
-# Кейсы по умолчанию (как на макете). Подарки ищутся в каталоге по эмодзи и цене.
-# Веса — проценты с макета; шанс считается как вес / сумма весов кейса.
+# Кейсы по умолчанию. Подарки ищутся в каталоге по эмодзи и цене.
+# Шанс = вес / сумма весов кейса. Подарки за 15 ⭐ — самые частые; отдача игрокам (RTP) ~81% в обоих кейсах.
 DEFAULT_CASES = [
-    ("Все", 25, [("🏆", 100, 0.806), ("🌹", 25, 25), ("🎂", 50, 1.21), ("💝", 15, 21.37), ("🧸", 15, 21.37),
-                 ("🎁", 25, 25)]),
-    ("Романтика", 42, [("💝", 15, 11.05), ("🧸", 15, 11.05), ("🌹", 25, 36.83), ("💐", 50, 27.38),
-                       ("💍", 100, 6.84), ("💎", 100, 6.84)]),
+    ("Все", 25, [("🏆", 100, 1), ("🌹", 25, 14), ("🎂", 50, 5), ("💝", 15, 33), ("🧸", 15, 33), ("🎁", 25, 14)]),
+    ("Романтика", 42, [("💝", 15, 24), ("🧸", 15, 24), ("🌹", 25, 20), ("💐", 50, 20), ("💍", 100, 6),
+                       ("💎", 100, 6)]),
 ]
+# Веса первой версии — по ним понимаем, что админ шансы не трогал и их можно обновить.
+V1_WEIGHTS = {
+    "Все": {("🏆", 100): 0.806, ("🌹", 25): 25, ("🎂", 50): 1.21, ("💝", 15): 21.37, ("🧸", 15): 21.37,
+            ("🎁", 25): 25},
+    "Романтика": {("💝", 15): 11.05, ("🧸", 15): 11.05, ("🌹", 25): 36.83, ("💐", 50): 27.38, ("💍", 100): 6.84,
+                  ("💎", 100): 6.84},
+}
+DEFAULTS_VERSION = "2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +84,7 @@ class RouletteService:
         gifts = await self.catalog.gifts()
         if not gifts:
             return
+        await self.settings.set("roulette_defaults_version", DEFAULTS_VERSION)
         for name, price, spec in DEFAULT_CASES:
             case_id = await self.db.create_roulette_case(name, price)
             for emoji, gift_price, weight in spec:
@@ -84,6 +92,22 @@ class RouletteService:
                 if gift:
                     await self.db.add_roulette_prize(case_id, gift.id, emoji, gift_price, weight)
         log.info("Созданы кейсы рулетки по умолчанию")
+
+    async def upgrade_default_weights(self) -> None:
+        """Переносит новые шансы по умолчанию в уже созданные кейсы — только если их не меняли вручную."""
+        if self.settings.get("roulette_defaults_version") == DEFAULTS_VERSION:
+            return
+        new = {name: {(e, p): w for e, p, w in spec} for name, _, spec in DEFAULT_CASES}
+        for case in await self.db.roulette_cases():
+            old = V1_WEIGHTS.get(case["name"])
+            prizes = await self.db.roulette_prizes(case["id"])
+            current = {(p["gift_emoji"], p["gift_price"]): p["weight"] for p in prizes}
+            if not old or not current or any(old.get(k) != w for k, w in current.items()):
+                continue  # не кейс по умолчанию или шансы уже настроены админом
+            for p in prizes:
+                await self.db.set_prize_weight(p["id"], new[case["name"]][(p["gift_emoji"], p["gift_price"])])
+            log.info("Обновлены шансы кейса «%s»", case["name"])
+        await self.settings.set("roulette_defaults_version", DEFAULTS_VERSION)
 
     async def active_cases(self) -> list[tuple[Row, list[Row]]]:
         result = []

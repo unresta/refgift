@@ -29,6 +29,7 @@ DEFAULTS: dict[str, str] = {
     "roulette_demo": "1",           # демо-прокрутка без оплаты и без приза
     "roulette_require_sub": "1",    # играть только после обязательной подписки
     "roulette_menu_text": "🎰 Рулетка",
+    "roulette_defaults_version": "1",  # версия шансов кейсов по умолчанию (для безопасного обновления)
 
     "remind_enabled": "1",
     "remind_count": "3",
