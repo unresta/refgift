@@ -120,13 +120,16 @@ class RewardService:
             log.debug("Не удалось уведомить реферера %s: %s", referrer_id, e)
 
     # ---------- награды ----------
-    async def send_gift(self, user_id: int, gift_id: str | None = None) -> str | None:
-        """Отправляет подарок Telegram за звёзды бота. Возвращает текст ошибки или None."""
+    async def send_gift(self, user_id: int, gift_id: str | None = None, with_text: bool = True) -> str | None:
+        """Отправляет подарок Telegram за звёзды бота. Возвращает текст ошибки или None.
+
+        with_text=False — без подписи (выигрыши рулетки).
+        """
         try:
             await self.bot.send_gift(
                 gift_id=gift_id or self.settings.get("gift_id"),
                 user_id=user_id,
-                text=self.settings.get("gift_text") or None,
+                text=(self.settings.get("gift_text") or None) if with_text else None,
             )
         except TelegramAPIError as e:
             log.warning("send_gift(%s) failed: %s", user_id, e)
@@ -150,7 +153,7 @@ class RewardService:
         gift_id = gift_id or self.settings.get("gift_id")
         error: str | None = None
         if auto or (auto is None and self.settings.get("reward_mode") == "auto"):
-            error = await self.send_gift(user_id, gift_id)
+            error = await self.send_gift(user_id, gift_id, with_text=spin_id is None)
             if error is None:
                 await self.db.create_claim(user_id, "sent", "auto", gift_id, check_id=check_id, spin_id=spin_id)
                 return ClaimResult.SENT
@@ -205,7 +208,7 @@ class RewardService:
 
         user_id = claim["user_id"]
         if action == "send":
-            error = await self.send_gift(user_id, claim["gift_id"])
+            error = await self.send_gift(user_id, claim["gift_id"], with_text=not claim["spin_id"])
             if error:
                 await self.db.set_claim_error(claim_id, error)
                 return False, f"Не удалось отправить: {error}"

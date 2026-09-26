@@ -286,6 +286,7 @@ async def scenario(dp, db, bot, session) -> None:
     await feed(cb_update(100, U(a="claim").pack()))
     gifts = session.by_type(SendGift)
     check(len(gifts) == 1 and gifts[0].user_id == 100, "подарок отправлен автоматически")
+    check(gifts[0].text == settings.get("gift_text"), "реферальный подарок — с подписью из настроек")
     await feed(cb_update(100, U(a="claim").pack()))
     check(len(session.by_type(SendGift)) == 1, "повторно забрать нельзя")
 
@@ -769,6 +770,7 @@ async def scenario(dp, db, bot, session) -> None:
         check(st["status"] == "sent" and gift.user_id == 700 and gift.gift_id in ("g_rose", "g_bear")
               and st["prize"]["gift_id"] == gift.gift_id,
               f"рулетка остановилась → отправлен {st['prize']['emoji']}")
+        check(gift.text is None, "выигрыш рулетки — без подписи")
         check("Рулетка «Все»" in session.texts_to(700)[-1], "в чат пришло сообщение о выигрыше — после прокрутки")
         await client.post(f"/api/spin/{spin['spin_id']}/reveal", json={}, headers=auth(700))
         await roulette.deliver(spin["spin_id"])
@@ -802,6 +804,12 @@ async def scenario(dp, db, bot, session) -> None:
         check(claim["spin_id"] == spin2["spin_id"], "заявка связана с прокруткой")
         await feed(cb_update(ADMIN, A(s="cl", a="card", id=claim["id"]).pack()))
         check("Вернуть 25 ⭐" in str(session.screen().reply_markup), "в заявке есть кнопка возврата звёзд")
+        await feed(cb_update(ADMIN, A(s="cl", a="send", id=claim["id"]).pack()))
+        check(session.by_type(SendGift)[-1].text is None and (await db.get_claim(claim["id"]))["status"] == "sent",
+              "из очереди выигрыш рулетки тоже уходит без подписи")
+        claim = (await db.list_claims("sent", 1, 0))[0]
+        await db.run("UPDATE claims SET status = 'pending' WHERE id = ?", claim["id"])
+        await db.set_spin_status(spin2["spin_id"], "pending")
         await feed(cb_update(ADMIN, A(s="cl", a="refund_ok", id=claim["id"]).pack()))
         refund = session.by_type(RefundStarPayment)[-1]
         check(refund.telegram_payment_charge_id == "charge_2"
