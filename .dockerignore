@@ -11,3 +11,4 @@ tests
 *.md
 docker-compose.yml
 Dockerfile
+certs

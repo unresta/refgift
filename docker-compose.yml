@@ -30,7 +30,8 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${CADDYFILE:-./Caddyfile}:/etc/caddy/Caddyfile:ro   # CADDYFILE=./Caddyfile.cloudflare — за прокси Cloudflare
+      - ./certs:/certs:ro
       - caddy-data:/data
       - caddy-config:/config
     depends_on:

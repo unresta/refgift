@@ -1,0 +1,8 @@
+# Вариант для оранжевого облака Cloudflare (Proxied): сертификат — Cloudflare Origin Certificate
+# (SSL/TLS → Origin Server), режим SSL/TLS в Cloudflare — Full (strict).
+# Файлы сертификата: ./certs/origin.pem и ./certs/origin.key
+{$DOMAIN} {
+	tls /certs/origin.pem /certs/origin.key
+	encode zstd gzip
+	reverse_proxy bot:8080
+}

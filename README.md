@@ -81,6 +81,13 @@ docker compose logs -f      # логи
 2. В `.env`: `DOMAIN=gifts.example.com` и `WEBAPP_URL=https://gifts.example.com`.
 3. `docker compose --profile https up -d --build` — Caddy сам выпустит сертификат и проксирует на бота.
 
+**С оранжевым облаком Cloudflare (IP сервера скрыт):**
+1. A-запись `gifts` → IP сервера, Proxy status — **Proxied**.
+2. SSL/TLS → Overview → режим **Full (strict)**.
+3. SSL/TLS → Origin Server → **Create Certificate** (15 лет). Сертификат сохраните в `certs/origin.pem`, приватный ключ — в `certs/origin.key` (ключ показывается один раз).
+4. В `.env`: `CADDYFILE=./Caddyfile.cloudflare`, плюс `DOMAIN` и `WEBAPP_URL` как выше.
+5. `docker compose --profile https up -d --build`.
+
 Свой nginx/Caddy на хосте? Проксируйте на `127.0.0.1:8080` и укажите `WEBAPP_URL`. После запуска у бота появится кнопка меню «🎰 Рулетка» и кнопка в главном меню.
 
 Посмотреть интерфейс локально без Telegram: `python -m tests.webapp_preview` и открыть напечатанную ссылку.
