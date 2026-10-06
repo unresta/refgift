@@ -25,6 +25,8 @@ log = logging.getLogger(__name__)
 router = Router(name="admin_channel_gift_batch")
 
 BATCH_MAX = 100
+MAX_QTY = 10                # подарков на один канал
+QTY_PRESETS = (1, 3, 5, 10)
 COMMENT_MAX = 128
 SEND_DELAY = 0.4        # пауза между подарками — чтобы не упереться в лимиты Telegram
 PROGRESS_EVERY = 5      # как часто обновлять сообщение с прогрессом
@@ -38,6 +40,7 @@ class Batch:
     channels: dict[int | str, str] = field(default_factory=dict)
     gift_id: str = ""
     comment: str | None = None
+    qty: int = 1                # подарков на каждый канал
     running: bool = False
     stop: bool = False
 
@@ -204,14 +207,15 @@ async def cb_gifts(call: CallbackQuery, callback_answer: CallbackAnswer, bot: Bo
         callback_answer.text = "Сначала добавьте каналы"
         await show_builder(call, state, batch)
         return
-    n = len(batch.channels)
+    n, q = len(batch.channels), batch.qty
     balance = await star_balance(bot)
-    buttons = [btn(f"{gift_emoji(g)} {g.star_count}⭐ · {fmt_num(g.star_count * n)}", "cgb", "gift", v=g.id)
+    buttons = [btn(f"{gift_emoji(g)} {g.star_count}⭐ · {fmt_num(g.star_count * n * q)}", "cgb", "gift", v=g.id)
                for g in sorted(await catalog.gifts(), key=lambda g: g.star_count)]
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     rows.append(topup_button(balance, settings, "cgift"))
     rows.append(back("cgb", text="« К каналам"))
-    await show(call, f"🎁 <b>Какой подарок отправить?</b>\n\nКаналов: <b>{n}</b> — по одному подарку на канал.\n"
+    await show(call, f"🎁 <b>Какой подарок отправить?</b>\n\nКаналов: <b>{n}</b> · подарков на канал: <b>{q}</b> "
+                     "(количество меняется на следующем шаге).\n"
                      f"⭐ Баланс бота: <b>{fmt_num(balance) if balance is not None else '—'}</b>\n\n"
                      "<i>На кнопке: цена подарка · итого за всю пачку.</i>", kb(*rows))
 
@@ -270,29 +274,45 @@ async def confirm_screen(bot: Bot, batch: Batch, catalog: GiftCatalog) -> tuple[
     gift = await catalog.get(batch.gift_id)
     if gift is None or not batch.channels:
         return "⚠️ Подарок больше недоступен или пачка пуста — начните заново.", kb(back("cgb", text="« К каналам"))
-    n = len(batch.channels)
-    total = gift.star_count * n
+    n, q = len(batch.channels), batch.qty
+    count = n * q
+    total = gift.star_count * count
     balance = await star_balance(bot)
     names = list(batch.channels.values())
     lines = [
         "📦 <b>Проверьте пачку</b>\n",
         f"📢 Каналов: <b>{n}</b> — " + ", ".join(esc(t) for t in names[:10]) + (f" и ещё {n - 10}" if n > 10 else ""),
-        f"🎁 Подарок: {gift_emoji(gift)} · {gift.star_count} ⭐ на канал",
+        f"🎁 Подарок: {gift_emoji(gift)} · {gift.star_count} ⭐",
+        f"🔢 На каждый канал: <b>{q}</b> шт. — всего <b>{fmt_num(count)}</b> подарков",
         f"💬 Комментарий: {f'«{batch.comment}»' if batch.comment else 'без комментария'}",
         f"💰 Итого: <b>{fmt_num(total)}</b> ⭐",
         f"⭐ Баланс бота: <b>{fmt_num(balance) if balance is not None else '—'}</b>",
     ]
     if balance is not None and balance < total:
-        lines.append(f"\n⚠️ Звёзд хватит примерно на {balance // gift.star_count} из {n} — остальные не уйдут. "
-                     "Пополните баланс или уберите часть каналов.")
+        lines.append(f"\n⚠️ Звёзд хватит примерно на {balance // gift.star_count} из {fmt_num(count)} подарков — "
+                     "остальные не уйдут. Пополните баланс, уменьшите количество или уберите часть каналов.")
+
+    def qty_btn(text: str, value: int):
+        return btn(text, "cgb", "qty", id=max(1, min(MAX_QTY, value)))
+
     return "\n".join(lines), kb(
-        [btn(f"🚀 Отправить на {n} кан. · {fmt_num(total)} ⭐", "cgb", "send", style="success")],
+        [qty_btn("➖", q - 1), btn(f"{q} на канал", "noop"), qty_btn("➕", q + 1)],
+        [qty_btn(f"{'• ' if p == q else ''}{p}", p) for p in QTY_PRESETS],
+        [btn(f"🚀 Отправить {fmt_num(count)} шт. на {n} кан. · {fmt_num(total)} ⭐", "cgb", "send", style="success")],
         [btn("💬 Комментарий", "cgb", "gift", v=gift.id), btn("🎁 Подарок", "cgb", "gifts")],
         [btn("📢 Каналы", "cgb")],
     )
 
 
-async def send_one(bot: Bot, gift_id: str, chat_id: int, text: str | None) -> str | None:
+@router.callback_query(A.filter((F.s == "cgb") & (F.a == "qty")))
+async def cb_qty(call: CallbackQuery, callback_data: A, bot: Bot, catalog: GiftCatalog) -> None:
+    batch = batch_of(call.from_user.id)
+    if not batch.running:
+        batch.qty = max(1, min(MAX_QTY, callback_data.id))
+    await show(call, *await confirm_screen(bot, batch, catalog))
+
+
+async def send_one(bot: Bot, gift_id: str, chat_id: int | str, text: str | None) -> str | None:
     for attempt in range(2):
         try:
             await bot.send_gift(gift_id=gift_id, chat_id=chat_id, text=text)
@@ -314,39 +334,57 @@ async def edit(bot: Bot, chat_id: int, message_id: int, text: str, markup: Inlin
 
 
 async def run_batch(bot: Bot, admin_id: int, message_id: int, batch: Batch, gift: Gift) -> None:
+    """Отправка кругами: по одному подарку на каждый канал, затем следующий круг — при нехватке звёзд
+    каналы получат поровну. Канал, который отказал, в следующих кругах пропускается."""
     items = list(batch.channels.items())
+    q = batch.qty
+    total = len(items) * q
     emoji = gift_emoji(gift)
-    sent, failed, stopped = 0, [], ""
+    got = {chat_id: 0 for chat_id, _ in items}
+    dead: dict[int | str, str] = {}  # канал → ошибка
+    sent = attempts = 0
+    stopped = ""
     stop_kb = kb([btn("⏹ Остановить", "cgb", "stop", style="danger")])
     try:
-        for i, (chat_id, title) in enumerate(items, 1):
-            if batch.stop:
-                stopped = "остановлено"
-                break
-            error = await send_one(bot, gift.id, chat_id, batch.comment)
-            if error:
-                failed.append(f"{esc(title)} — <code>{esc(error)}</code>")
-                if any(k in error.upper() for k in STOP_ERRORS):
-                    stopped = "не хватает звёзд"
+        for _ in range(q):
+            for chat_id, title in items:
+                if chat_id in dead:
+                    continue
+                if batch.stop:
+                    stopped = "остановлено"
                     break
-            else:
-                sent += 1
-            if i % PROGRESS_EVERY == 0 and i < len(items):
-                await edit(bot, admin_id, message_id,
-                           f"⏳ Отправляю {emoji}… <b>{i}</b> из {len(items)}\n✅ {sent} · ❌ {len(failed)}", stop_kb)
-            await asyncio.sleep(SEND_DELAY)
+                error = await send_one(bot, gift.id, chat_id, batch.comment)
+                attempts += 1
+                if error:
+                    dead[chat_id] = error
+                    if any(k in error.upper() for k in STOP_ERRORS):
+                        stopped = "не хватает звёзд"
+                        break
+                else:
+                    got[chat_id] += 1
+                    sent += 1
+                if attempts % PROGRESS_EVERY == 0:
+                    await edit(bot, admin_id, message_id,
+                               f"⏳ Отправляю {emoji}… <b>{sent}</b> из {fmt_num(total)}\n"
+                               f"✅ {sent} · ❌ каналов с ошибкой: {len(dead)}", stop_kb)
+                await asyncio.sleep(SEND_DELAY)
+            if stopped or len(dead) == len(items):
+                break
     finally:
         batch.running = batch.stop = False
 
-    log.info("Админ %s: пачка %s × %s — отправлено %s из %s", admin_id, emoji, gift.id, sent, len(items))
-    left = len(items) - sent - len(failed)
+    log.info("Админ %s: пачка %s × %s — отправлено %s из %s", admin_id, emoji, gift.id, sent, total)
+    titles = dict(items)
+    failed = [f"{esc(titles[cid])} — " + (f"{got[cid]} из {q} · " if q > 1 else "") + f"<code>{esc(err)}</code>"
+              for cid, err in dead.items()]
     lines = [f"📦 <b>Пачка {'остановлена' if stopped else 'отправлена'}</b>\n",
-             f"✅ Отправлено: <b>{sent}</b> из {len(items)} {emoji} ({fmt_num(sent * gift.star_count)} ⭐)"]
+             f"✅ Отправлено: <b>{fmt_num(sent)}</b> из {fmt_num(total)} {emoji} ({fmt_num(sent * gift.star_count)} ⭐)"
+             + (f" — по {q} на канал" if q > 1 else "")]
     if failed:
-        lines.append(f"❌ Ошибок: <b>{len(failed)}</b>")
+        lines.append(f"❌ Каналов с ошибкой: <b>{len(failed)}</b>")
         lines += failed[:20] + ([f"… и ещё {len(failed) - 20}"] if len(failed) > 20 else [])
-    if stopped and left:
-        lines.append(f"\n⏹ {stopped.capitalize()} — не отправлено: <b>{left}</b>")
+    if stopped and sent < total:
+        lines.append(f"\n⏹ {stopped.capitalize()} — не отправлено: <b>{fmt_num(total - sent)}</b>")
     await edit(bot, admin_id, message_id, "\n".join(lines), kb(
         [btn("🔁 Другой подарок на эти каналы", "cgb", "gifts")],
         [btn("📦 Новая пачка", "cgb", "new"), btn("« Подарок на канал", "cgift")],

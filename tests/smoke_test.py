@@ -44,6 +44,8 @@ class FakeSession(BaseSession):
         self.gift_error: str | None = None
         self.balance = 100
         self.reject_icons = False  # как у бота, владелец которого без Telegram Premium
+        self.gift_budget: int | None = None  # сколько подарков ещё «оплачено» — дальше BALANCE_TOO_LOW
+        self.gift_refuse: set = set()  # каналы, которые не принимают подарки
 
     async def close(self) -> None:
         pass
@@ -93,6 +95,12 @@ class FakeSession(BaseSession):
         if isinstance(method, SendGift):
             if self.gift_error:
                 raise TelegramBadRequest(method=method, message=self.gift_error)
+            if method.chat_id in self.gift_refuse:
+                raise TelegramBadRequest(method=method, message="Bad Request: STARGIFT_PEER_INVALID")
+            if self.gift_budget is not None:
+                if self.gift_budget <= 0:
+                    raise TelegramBadRequest(method=method, message="Bad Request: BALANCE_TOO_LOW")
+                self.gift_budget -= 1
             return True
         if isinstance(method, GetAvailableGifts):
             thumb = {"file_id": "thumb", "file_unique_id": "t", "width": 64, "height": 64}
@@ -486,6 +494,36 @@ async def scenario(dp, db, bot, session) -> None:
     check("Пачка отправлена" in session.screen().text and "Отправлено: <b>4</b> из 4" in session.screen().text,
           "итоговый отчёт")
 
+    print("  — несколько подарков на канал")
+    chans = list(batch.channels)
+    await feed(cb_update(ADMIN, A(s="cgb", a="qty", id=3).pack()))
+    check("Отправить 12 шт. на 4 кан. · 300 ⭐" in str(session.screen().reply_markup)
+          and "всего <b>12</b> подарков" in session.screen().text and "хватит примерно на 4 из 12" in session.screen().text,
+          "3 на канал: итог 12 шт. и 300 ⭐, предупреждение о балансе")
+    await feed(cb_update(ADMIN, A(s="cgb", a="qty", id=50).pack()))
+    check(batch.qty == 10, "больше 10 на канал нельзя")
+    await feed(cb_update(ADMIN, A(s="cgb", a="qty", id=3).pack()))
+    session.gift_refuse = {chans[1]}
+    before = len(session.by_type(SendGift))
+    await feed(cb_update(ADMIN, A(s="cgb", a="send").pack()))
+    await cgb_mod.wait_batches()
+    session.gift_refuse = set()
+    calls = [g.chat_id for g in session.by_type(SendGift)[before:]]
+    check(calls == chans + [chans[0], chans[2], chans[3]] * 2,
+          "кругами: по одному на канал; отказавший канал больше не трогаем")
+    check("Отправлено: <b>9</b> из 12" in session.screen().text and "0 из 3 · <code>Bad Request: STARGIFT_PEER_INVALID"
+          in session.screen().text, "отчёт: сколько получил канал с ошибкой")
+    session.gift_budget = 6
+    before = len(session.by_type(SendGift))
+    await feed(cb_update(ADMIN, A(s="cgb", a="send").pack()))
+    await cgb_mod.wait_batches()
+    session.gift_budget = None
+    calls = [g.chat_id for g in session.by_type(SendGift)[before:]]
+    check(calls[:6] == chans + chans[:2] and "Отправлено: <b>6</b> из 12" in session.screen().text
+          and "не отправлено: <b>6</b>" in session.screen().text,
+          "звёзды кончились на втором круге — каналы получили поровну")
+    await feed(cb_update(ADMIN, A(s="cgb", a="qty", id=1).pack()))
+
     session.gift_error = "BALANCE_TOO_LOW"
     await feed(cb_update(ADMIN, A(s="cgb", a="gift", v="g_bear").pack()))
     await feed(cb_update(ADMIN, A(s="cgb", a="none").pack()))
@@ -494,7 +532,7 @@ async def scenario(dp, db, bot, session) -> None:
     await cgb_mod.wait_batches()
     session.gift_error = None
     check(len(session.by_type(SendGift)) == before + 1 and session.by_type(SendGift)[-1].text is None
-          and "не хватает звёзд — не отправлено: <b>3</b>" in session.screen().text.lower(),
+          and "не хватает звёзд — не отправлено: <b>4</b>" in session.screen().text.lower(),
           "звёзды кончились — остальные не отправляем, отчёт с причиной")
 
     cgb_mod.SEND_DELAY = 0.05
