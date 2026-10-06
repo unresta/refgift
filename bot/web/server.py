@@ -103,11 +103,6 @@ async def spin_prize_json(ctx: WebContext, spin: Row) -> dict | None:
             "media": media_kind(gift) if gift else None, "thumb": bool(gift and gift.sticker.thumbnail)}
 
 
-def short_name(full_name: str | None) -> str:
-    parts = (full_name or "Игрок").split()
-    return parts[0] if len(parts) == 1 else f"{parts[0]} {parts[1][0]}."
-
-
 async def need_sub(ctx: WebContext, user_id: int, fresh: bool = False) -> list[dict]:
     if not ctx.settings.flag("roulette_require_sub"):
         return []
@@ -195,16 +190,6 @@ async def api_demo(request: web.Request) -> web.Response:
     return web.json_response({"prize": await prize_json(ctx, prize)})
 
 
-async def api_top(request: web.Request) -> web.Response:
-    ctx = ctx_of(request)
-    recent = [{"name": short_name(s["full_name"]), "case": s["case_name"], "at": s["paid_at"],
-               **(await spin_prize_json(ctx, s) or {})} for s in await ctx.db.recent_wins(20)]
-    top = [{"name": short_name(r["full_name"]), "spins": r["spins"], "won": r["won"] or 0, "best": r["best"] or 0,
-            "me": r["user_id"] == request["user"]["user_id"]}
-           for r in await ctx.db.top_winners(int(time.time()) - 7 * 86400, 20)]
-    return web.json_response({"recent": recent, "top": top})
-
-
 async def api_profile(request: web.Request) -> web.Response:
     ctx, user = ctx_of(request), request["user"]
     spins = await ctx.db.user_spins(user["user_id"], 50)
@@ -245,7 +230,6 @@ def create_app(ctx: WebContext) -> web.Application:
     app.router.add_get("/api/spin/{spin_id:\\d+}", api_spin_status)
     app.router.add_post("/api/spin/{spin_id:\\d+}/reveal", api_spin_reveal)
     app.router.add_post("/api/demo", api_demo)
-    app.router.add_get("/api/top", api_top)
     app.router.add_get("/api/profile", api_profile)
     app.router.add_get("/api/gift/{gift_id:\\w+}", gift_media)
     app.router.add_get("/api/gift/{gift_id:\\w+}/{thumb:thumb}", gift_media)

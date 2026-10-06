@@ -960,20 +960,6 @@ class Database:
             user_id, limit,
         )
 
-    async def recent_wins(self, limit: int = 20) -> list[aiosqlite.Row]:
-        return await self.all(
-            "SELECT s.*, u.full_name FROM spins s LEFT JOIN users u USING(user_id) "
-            "WHERE s.paid_at IS NOT NULL AND s.status != 'refunded' ORDER BY s.id DESC LIMIT ?", limit,
-        )
-
-    async def top_winners(self, since: int, limit: int = 20) -> list[aiosqlite.Row]:
-        return await self.all(
-            "SELECT s.user_id, u.full_name, COUNT(*) AS spins, SUM(s.gift_price) AS won, MAX(s.gift_price) AS best "
-            "FROM spins s LEFT JOIN users u USING(user_id) "
-            "WHERE s.paid_at >= ? AND s.status != 'refunded' GROUP BY s.user_id ORDER BY won DESC LIMIT ?",
-            since, limit,
-        )
-
     async def roulette_stats(self, since: int = 0) -> list[aiosqlite.Row]:
         """По кейсам: прокрутки, выручка, стоимость выданных подарков."""
         return await self.all(

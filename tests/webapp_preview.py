@@ -49,7 +49,7 @@ async def main() -> None:
     dp, db, _ = await build(config, bot)
     await dp["roulette"].seed_defaults()
 
-    # немного истории для вкладок «Топ» и «Профиль»
+    # немного истории для вкладки «Профиль»
     case = (await db.roulette_cases())[0]
     for uid, name in ((USER_ID, "Павел Дуров"), (7, "Анна Смирнова"), (8, "Макс"), (9, "Olga K")):
         await db.upsert_user(uid, None, name)

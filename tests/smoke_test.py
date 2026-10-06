@@ -1173,9 +1173,9 @@ async def scenario(dp, db, bot, session) -> None:
         check(r.status == 404, "чужой спин не виден")
 
         prof = await (await client.get("/api/profile", headers=auth(700))).json()
-        top = await (await client.get("/api/top", headers=auth(700))).json()
-        check(prof["spins"] == 1 and prof["history"][0]["status"] == "sent" and top["recent"][0]["name"] == "User700",
-              "профиль и топ показывают выигрыш")
+        r = await client.get("/api/top", headers=auth(700))
+        check(prof["spins"] == 1 and prof["history"][0]["status"] == "sent" and r.status == 404,
+              "профиль показывает выигрыш, вкладки «Топ» больше нет")
 
         r = await client.get(f"/api/gift/{gift.gift_id}")
         body = await r.json()

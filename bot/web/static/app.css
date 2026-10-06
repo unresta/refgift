@@ -148,9 +148,6 @@ h1, h2 { margin: 0; }
 .list-row .body { flex: 1; min-width: 0; }
 .list-row .name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .list-row .sub { color: var(--hint); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.rank { width: 40px; text-align: center; font-weight: 600; color: var(--hint); flex: none; font-size: 17px; }
-.rank.medal { font-size: 26px; }
-.list-row.me { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .chip { font-size: 13px; padding: 3px 8px; border-radius: 8px; font-weight: 500; white-space: nowrap; }
 .chip.sent { color: #34c759; background: color-mix(in srgb, #34c759 14%, transparent); }
 .chip.pending { color: var(--gold); background: var(--gold-bg); }

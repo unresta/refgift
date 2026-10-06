@@ -5,11 +5,10 @@
   const $ = (sel, root = document) => root.querySelector(sel);
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const GAP = 12;
-  const MEDALS = ['🥇', '🥈', '🥉'];
 
   const state = {
     cases: [], caseIndex: 0, demo: false, demoAllowed: true, needSub: [],
-    busy: false, stripItems: [], x: 0, user: null, topTab: 'recent',
+    busy: false, stripItems: [], x: 0, user: null,
   };
 
   // ---------- утилиты ----------
@@ -27,14 +26,6 @@
     if (value >= 10) return `${+value.toFixed(2)}%`;
     if (value >= 1) return `${+value.toFixed(2)}%`;
     return `${+value.toPrecision(3)}%`;
-  }
-
-  function ago(ts) {
-    const diff = Math.max(0, Date.now() / 1000 - ts);
-    if (diff < 60) return 'только что';
-    if (diff < 3600) return `${Math.floor(diff / 60)} мин назад`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)} ч назад`;
-    return new Date(ts * 1000).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
   }
 
   async function api(path, body) {
@@ -365,7 +356,7 @@
     }
     $('#again').addEventListener('click', () => { closeSheet(); onSpin(); });
     $('#close-sheet').addEventListener('click', closeSheet);
-    if (!demo) { profileLoaded = false; topLoaded = false; }
+    if (!demo) profileLoaded = false;
   }
 
   // ---------- обязательная подписка ----------
@@ -399,53 +390,6 @@
       } catch (err) { alert(err.message); } finally { check.classList.remove('busy'); }
     });
   }
-
-  // ---------- топ ----------
-  let topLoaded = false;
-  let topData = null;
-
-  function renderTop() {
-    const list = $('#top-list');
-    if (!topData) { list.innerHTML = '<div class="empty"><div class="boot-spinner" style="margin:auto"></div></div>'; return; }
-    const rows = state.topTab === 'recent' ? topData.recent : topData.top;
-    if (!rows.length) {
-      list.innerHTML = '<div class="empty"><div class="big">🎲</div>Пока пусто — стань первым!</div>';
-      return;
-    }
-    list.replaceChildren();
-    rows.forEach((r, i) => {
-      const row = document.createElement('div');
-      row.className = `list-row ${r.me ? 'me' : ''}`;
-      if (state.topTab === 'recent') {
-        row.append(giftNode(r));
-        row.insertAdjacentHTML('beforeend', `
-          <div class="body"><div class="name">${esc(r.name)}</div>
-          <div class="sub">«${esc(r.case)}» · ${ago(r.at)}</div></div>${pill(r.price)}`);
-      } else {
-        row.innerHTML = `<div class="rank ${i < 3 ? 'medal' : ''}">${MEDALS[i] || i + 1}</div>
-          <div class="body"><div class="name">${esc(r.name)}${r.me ? ' · вы' : ''}</div>
-          <div class="sub">${r.spins} прокрут. · лучший приз ${r.best} ${star()}</div></div>${pill(r.won)}`;
-      }
-      list.append(row);
-    });
-  }
-
-  async function loadTop() {
-    if (topLoaded) return;
-    topData = null;
-    renderTop();
-    try { topData = await api('/api/top'); topLoaded = true; } catch (err) { topData = { recent: [], top: [] }; alert(err.message); }
-    renderTop();
-  }
-
-  $('#top-tabs').addEventListener('click', (e) => {
-    const btn = e.target.closest('.seg');
-    if (!btn || btn.dataset.tab === state.topTab) return;
-    state.topTab = btn.dataset.tab;
-    haptic.select();
-    document.querySelectorAll('#top-tabs .seg').forEach((b) => b.classList.toggle('active', b === btn));
-    renderTop();
-  });
 
   // ---------- профиль ----------
   let profileLoaded = false;
@@ -498,7 +442,6 @@
     document.querySelectorAll('.screen').forEach((s) => s.classList.toggle('active', s.id === `screen-${name}`));
     document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.screen === name));
     window.scrollTo(0, 0);
-    if (name === 'top') loadTop();
     if (name === 'profile') loadProfile();
     if (name === 'play') requestAnimationFrame(() => setX(xForIndex(Math.max(0, indexAt(state.x)))));
   }
