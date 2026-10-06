@@ -15,7 +15,7 @@ from bot.config import Config, load_config
 from bot.database import Database
 from bot.handlers import inline, user
 from bot.handlers.admin import build_admin_router
-from bot.middlewares import SubscriptionGate, ThrottlingMiddleware, UserMiddleware
+from bot.middlewares import ClearUserInput, SubscriptionGate, ThrottlingMiddleware, UserMiddleware
 from bot.services.admins import AdminRegistry
 from bot.services.broadcast import Broadcaster
 from bot.services.checks import CheckService
@@ -70,6 +70,7 @@ async def build(config: Config, bot: Bot) -> tuple[Dispatcher, Database, AdminRe
     dp.callback_query.middleware(CallbackAnswerMiddleware())
 
     user.router.message.middleware(SubscriptionGate())
+    user.router.callback_query.middleware(ClearUserInput())
     user.router.callback_query.middleware(SubscriptionGate())
 
     dp.include_routers(build_admin_router(), inline.router, user.service_router, user.router)

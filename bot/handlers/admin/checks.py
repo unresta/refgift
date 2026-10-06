@@ -48,6 +48,8 @@ async def main_screen(bot: Bot, db: Database, settings: Settings, bot_username: 
         "<b>Как создать:</b> в любом чате начните писать",
         f"<code>@{bot_username} 10</code> — чек на 10 активаций",
         f"<code>@{bot_username} 10 С праздником!</code> — со своей подписью",
+        f"<code>@{bot_username} 10 пароль:весна С праздником!</code> — с паролем 🔐 "
+        "(в тексте чека его не будет; пользователь введёт его в боте)",
         "и нажмите на появившуюся карточку — чек уйдёт в чат.\n",
         "Каждый активирует чек один раз и только после подписки на все каналы — "
         "подписка проверяется заново прямо перед выдачей.",
@@ -76,7 +78,7 @@ async def main_screen(bot: Bot, db: Database, settings: Settings, bot_username: 
     if has_photo:
         rows.append([btn("🗑 Убрать общий баннер", "ck", "nophoto")])
     for c in items:
-        rows.append([btn(f"{status_icon(c)} {c['gift_emoji'] or ''} {c['code']} · {c['used']}/{c['total']}"
+        rows.append([btn(f"{status_icon(c)} {'🔐 ' if c['password'] else ''}{c['gift_emoji'] or ''} {c['code']} · {c['used']}/{c['total']}"
                          + (f" · {c['caption'][:20]}" if c["caption"] else ""), "ck", "card", id=c["id"])])
     rows.append(pager("ck", "open", page, pages))
     rows.append(back())
@@ -98,6 +100,7 @@ async def card_screen(db: Database, checks: CheckService, config: Config, check_
         f"📅 Создан: {fmt_dt(c['created_at'], config.tz)} · 👤 {esc(creator['full_name']) if creator else c['created_by']}",
         f"🎁 Подарок: {checks.emoji(c)} · {checks.price(c)} ⭐ за активацию",
         f"💬 Подпись: «{esc(c['caption'])}»" if c["caption"] else "💬 Подпись: из шаблона «Тексты → Подпись чека»",
+        f"🔐 Пароль: <code>{esc(c['password'])}</code>" if c["password"] else "🔓 Без пароля",
         "",
         f"📊 Активации: <b>{fmt_num(c['used'])} / {fmt_num(c['total'])}</b> · осталось {fmt_num(left)}",
         f"{progress_bar(c['used'], c['total'])} {percent(c['used'], c['total'])}%",

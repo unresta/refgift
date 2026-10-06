@@ -1,4 +1,6 @@
-"""Inline-режим: админы создают чеки (@bot 10 подпись), пользователи делятся реф-ссылкой."""
+"""Inline-режим: админы создают чеки (@bot 10 [пароль:слово] подпись), пользователи делятся реф-ссылкой."""
+import re
+
 from aiogram import Bot, Router
 from aiogram.types import (ChosenInlineResult, InlineKeyboardButton, InlineKeyboardMarkup, InlineQuery,
                            InlineQueryResultArticle, InlineQueryResultCachedPhoto, InlineQueryResultsButton,
@@ -9,7 +11,7 @@ from aiosqlite import Row
 from bot.database import Database
 from bot.handlers.admin.home import star_balance
 from bot.services.admins import AdminRegistry
-from bot.services.checks import MAX_ACTIVATIONS, CheckService
+from bot.services.checks import MAX_ACTIVATIONS, PASSWORD_MAX, CheckService
 from bot.services.gifts import GiftImages
 from bot.settings import Settings
 from bot.utils import fmt_num, render_template
@@ -19,6 +21,16 @@ router = Router(name="inline")
 
 RESULT_PREFIX = "chk:"
 MAX_CAPTION = 900
+# «пароль:qwerty», «pass=qwerty», «🔑qwerty» — в любом месте после числа активаций
+PASSWORD_RE = re.compile(r"(?:^|\s)(?:(?:пароль|pass|password)\s*[:=]|🔑)\s*(\S+)", re.I)
+
+
+def split_password(text: str) -> tuple[str, str | None]:
+    """Подпись без пароля и сам пароль."""
+    m = PASSWORD_RE.search(text)
+    if not m:
+        return text.strip(), None
+    return (text[:m.start()] + " " + text[m.end():]).strip(), m.group(1)[:PASSWORD_MAX]
 
 
 async def check_result(check: Row, checks: CheckService, settings: Settings, images: GiftImages,
@@ -29,7 +41,9 @@ async def check_result(check: Row, checks: CheckService, settings: Settings, ima
     title = f"{emoji} {price}⭐ × {fmt_num(total)}" + (" · по умолчанию" if is_default else "")
     if check["used"]:
         title += f" · осталось {left}"
-    description = f"Всего ~{fmt_num(need)} ⭐"
+    if check["password"]:
+        title = "🔐 " + title
+    description = (f"🔐 Пароль: {check['password']} · " if check["password"] else "") + f"всего ~{fmt_num(need)} ⭐"
     if balance is not None:
         description += f" · баланс {fmt_num(balance)} ⭐"
         if settings.get("reward_mode") == "auto" and balance < need:
@@ -76,7 +90,7 @@ async def on_inline(query: InlineQuery, bot: Bot, db: Database, settings: Settin
     parts = text.split(maxsplit=1)
     if not parts or not parts[0].isdigit():
         await query.answer([], cache_time=0, is_personal=True,
-                           button=hint("🎟 Введите число активаций: 10 [подпись]"))
+                           button=hint("🎟 Введите: 10 [пароль:слово] [подпись]"))
         return
 
     total = int(parts[0])
@@ -84,7 +98,8 @@ async def on_inline(query: InlineQuery, bot: Bot, db: Database, settings: Settin
         await query.answer([], cache_time=0, is_personal=True,
                            button=hint(f"⚠️ Активаций: от 1 до {fmt_num(MAX_ACTIVATIONS)}"))
         return
-    caption = parts[1].strip()[:MAX_CAPTION] if len(parts) > 1 else None
+    rest, password = split_password(parts[1]) if len(parts) > 1 else ("", None)
+    caption = rest[:MAX_CAPTION] or None
 
     # Все доступные подарки: подарок по умолчанию первым, остальные — по цене.
     default_id = settings.get("gift_id")
@@ -94,11 +109,12 @@ async def on_inline(query: InlineQuery, bot: Bot, db: Database, settings: Settin
         return
     results = []
     for gift in gifts[:50]:
-        check = await checks.get_or_create_draft(query.from_user.id, total, caption, gift)
+        check = await checks.get_or_create_draft(query.from_user.id, total, caption, gift, password)
         results.append(await check_result(check, checks, settings, gift_images, balance, gift,
                                           is_default=gift.id == default_id))
     await query.answer(results, cache_time=0, is_personal=True,
-                       button=hint(f"🎟 Выберите подарок для чека на {fmt_num(total)} активаций"))
+                       button=hint(f"🎟 Чек на {fmt_num(total)} активаций"
+                                   + (f" · 🔐 пароль: {password}" if password else "") + " — выберите подарок"))
 
 
 async def user_inline(query: InlineQuery, db: Database, settings: Settings, bot_username: str) -> None:

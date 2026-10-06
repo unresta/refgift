@@ -18,6 +18,9 @@ from bot.utils import esc, render_template
 
 CHECK_PREFIX = "c_"
 MAX_ACTIVATIONS = 10_000
+PASSWORD_MAX = 64
+PASSWORD_ATTEMPTS = 5      # неверных попыток подряд…
+PASSWORD_LOCK = 600        # …и пауза в секундах — защита от перебора
 
 
 class CheckStatus(StrEnum):
@@ -28,6 +31,9 @@ class CheckStatus(StrEnum):
     INACTIVE = "inactive"
     EXHAUSTED = "exhausted"
     ALREADY = "already"
+    NEED_PASSWORD = "need_password"
+    WRONG_PASSWORD = "wrong_password"
+    LOCKED = "locked"        # слишком много неверных паролей
 
 
 @dataclass(slots=True)
@@ -36,6 +42,7 @@ class Activation:
     check: Row | None = None
     missing: list[Row] = field(default_factory=list)
     available: bool = False  # чек ещё можно получить (для текста экрана подписки)
+    attempts_left: int = 0   # для неверного пароля
 
 
 def _get(row: Row | dict, key: str):
@@ -57,6 +64,7 @@ class CheckService:
         self.rewards = rewards
         self.bot_username = bot_username
         self._last_cleanup = 0.0
+        self._password_fails: dict[tuple[int, int], tuple[int, float]] = {}  # (user, чек) → (ошибок, когда)
 
     # ---------- оформление ----------
     def url(self, code: str) -> str:
@@ -70,7 +78,10 @@ class CheckService:
 
     def caption(self, check: Row | dict) -> str:
         template = esc(check["caption"]) if check["caption"] else self.settings.get("check_caption")
-        return render_template(template, gift=self.emoji(check), count=check["total"])
+        text = render_template(template, gift=self.emoji(check), count=check["total"])
+        if _get(check, "password"):
+            text += "\n\n🔐 <b>Чек с паролем</b> — после перехода бот попросит его ввести."
+        return text
 
     def keyboard(self, check: Row | dict) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(inline_keyboard=[[
@@ -78,9 +89,10 @@ class CheckService:
         ]])
 
     # ---------- создание ----------
-    async def get_or_create_draft(self, admin_id: int, total: int, caption: str | None, gift: Gift) -> Row:
+    async def get_or_create_draft(self, admin_id: int, total: int, caption: str | None, gift: Gift,
+                                  password: str | None = None) -> Row:
         with_photo = bool(self.settings.get("check_photo") or await self.db.get_gift_banner(gift.id))
-        draft = await self.db.find_draft_check(admin_id, total, caption, with_photo, gift.id)
+        draft = await self.db.find_draft_check(admin_id, total, caption, with_photo, gift.id, password)
         if draft:
             return await self.db.get_check(draft["id"])
         if time.monotonic() - self._last_cleanup > 3600:
@@ -90,13 +102,44 @@ class CheckService:
         while await self.db.get_check_by_code(code):
             code = random_code()
         check_id = await self.db.create_check(code, total, caption, with_photo, admin_id,
-                                              gift.id, gift_emoji(gift), gift.star_count)
+                                              gift.id, gift_emoji(gift), gift.star_count, password)
         check = await self.db.get_check(check_id)
         assert check is not None
         return check
 
+    # ---------- пароль ----------
+    def _locked(self, key: tuple[int, int]) -> bool:
+        fails, last = self._password_fails.get(key, (0, 0.0))
+        if time.monotonic() - last > PASSWORD_LOCK:
+            self._password_fails.pop(key, None)
+            return False
+        return fails >= PASSWORD_ATTEMPTS
+
+    def _fail(self, key: tuple[int, int]) -> int:
+        """Отмечает неверный пароль; возвращает, сколько попыток осталось."""
+        fails = self._password_fails.get(key, (0, 0.0))[0] + 1
+        self._password_fails[key] = (fails, time.monotonic())
+        return max(0, PASSWORD_ATTEMPTS - fails)
+
+    async def _check_password(self, user_id: int, check: Row, password: str | None) -> Activation | None:
+        """None — пароль верный (или не нужен), иначе — что показать пользователю."""
+        if not check["password"]:
+            return None
+        key = (user_id, check["id"])
+        if self._locked(key):
+            return Activation(CheckStatus.LOCKED, check)
+        if password is None:
+            return Activation(CheckStatus.NEED_PASSWORD, check)
+        if password.strip().casefold() != check["password"].casefold():
+            left = self._fail(key)
+            return Activation(CheckStatus.LOCKED if left == 0 else CheckStatus.WRONG_PASSWORD, check,
+                              attempts_left=left)
+        self._password_fails.pop(key, None)
+        return None
+
     # ---------- активация ----------
-    async def activate(self, user_id: int, code: str) -> Activation:
+    async def activate(self, user_id: int, code: str, password: str | None = None) -> Activation:
+        """password=None — пароль ещё не вводили: для чека с паролем вернётся NEED_PASSWORD."""
         check = await self.db.get_check_by_code(code)
 
         # Подписка проверяется первой и всегда заново, без кэша — даже если чек закончился или не найден:
@@ -121,6 +164,9 @@ class CheckService:
         if check["used"] >= check["total"]:
             await self.db.set_pending_check(user_id, None)
             return Activation(CheckStatus.EXHAUSTED, check)
+        if denied := await self._check_password(user_id, check, password):
+            await self.db.set_pending_check(user_id, None)  # дальше код чека хранит ввод пароля (FSM)
+            return denied
 
         activated = await self.db.try_activate_check(check["id"], user_id)
         await self.db.set_pending_check(user_id, None)

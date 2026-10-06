@@ -1085,6 +1085,67 @@ async def scenario(dp, db, bot, session) -> None:
     check(settings.get("check_photo").startswith("photo"), "картинка файлом PNG перезалита как фото")
     await gift_images.wait()
 
+    print("  — чеки с паролем")
+    await feed(inline_update(ADMIN, "5 пароль:Весна С праздником!"))
+    answer = session.by_type(AnswerInlineQuery)[-1]
+    pw_check = await db.get_check(int(answer.results[0].id.removeprefix("chk:")))
+    check(pw_check["password"] == "Весна" and pw_check["caption"] == "С праздником!"
+          and answer.results[0].title.startswith("🔐") and "Пароль: Весна" in answer.results[0].description
+          and "пароль: Весна" in answer.button.text, "инлайн: пароль из запроса, в карточке и подсказке")
+    caption = answer.results[0].caption
+    check("Весна" not in caption and "С праздником!" in caption and "Чек с паролем" in caption,
+          "в тексте чека пароля нет — только пометка 🔐")
+    await feed(inline_update(ADMIN, "5 С праздником!"))
+    plain = await db.get_check(int(session.by_type(AnswerInlineQuery)[-1].results[0].id.removeprefix("chk:")))
+    check(plain["id"] != pw_check["id"] and plain["password"] is None, "без пароля — отдельный чек")
+    await feed(inline_update(ADMIN, "5 🔑весна"))
+    other = await db.get_check(int(session.by_type(AnswerInlineQuery)[-1].results[0].id.removeprefix("chk:")))
+    check(other["password"] == "весна" and other["caption"] is None, "формат 🔑пароль")
+
+    pw_code = pw_check["code"]
+    for uid in (510, 511, 512, 513):
+        session.members.update({(CHANNEL, uid), (-1002, uid)})
+    gifts_before = len(session.by_type(SendGift))
+    await feed(msg_update(510, f"/start c_{pw_code}"))
+    check("защищён паролем" in session.texts_to(510)[-1] and len(session.by_type(SendGift)) == gifts_before,
+          "переход по чеку — бот просит пароль")
+    await feed(msg_update(510, "зима"))
+    check("Неверный пароль" in session.texts_to(510)[-1] and "осталось попыток: <b>4</b>" in session.texts_to(510)[-1]
+          and len(session.by_type(SendGift)) == gifts_before, "неверный пароль — подарка нет, попытки считаются")
+    await feed(msg_update(510, "  ВЕСНА "))
+    check(session.by_type(SendGift)[-1].user_id == 510 and "Чек активирован" in session.texts_to(510)[-1],
+          "верный пароль (регистр и пробелы не важны) — подарок отправлен")
+    await feed(msg_update(510, "весна"))
+    check(len(session.by_type(SendGift)) == gifts_before + 1 and "Твой прогресс" in session.texts_to(510)[-1],
+          "после активации ввод пароля закончился — обычное меню")
+
+    for word in ("1", "2", "3", "4", "5"):
+        if word == "1":
+            await feed(msg_update(512, f"/start c_{pw_code}"))
+        await feed(msg_update(512, word))
+    check("Слишком много неверных попыток" in session.texts_to(512)[-1], "5 ошибок — пауза")
+    await feed(msg_update(512, f"/start c_{pw_code}"))
+    check("Слишком много" in session.texts_to(512)[-1], "во время паузы даже верный пароль не спросят")
+
+    await feed(msg_update(513, f"/start c_{pw_code}"))
+    await feed(cb_update(513, U(a="menu").pack()))
+    await feed(msg_update(513, "весна"))
+    check(len(session.by_type(SendGift)) == gifts_before + 1 and "Твой прогресс" in session.texts_to(513)[-1],
+          "ушёл в меню кнопкой — текст больше не считается паролем")
+
+    session.members.discard((CHANNEL, 511))
+    await feed(msg_update(511, f"/start c_{pw_code}"))
+    check("по чеку" in session.texts_to(511)[-1], "без подписки — сначала подписка")
+    session.members.add((CHANNEL, 511))
+    await feed(cb_update(511, U(a="check").pack()))
+    check("защищён паролем" in session.texts_to(511)[-1], "после подписки — просим пароль")
+    await feed(msg_update(511, "Весна"))
+    check(session.by_type(SendGift)[-1].user_id == 511, "пароль после подписки — подарок отправлен")
+
+    await feed(cb_update(ADMIN, A(s="ck", a="card", id=pw_check["id"]).pack()))
+    check("🔐 Пароль: <code>Весна</code>" in session.screen().text and "2 / 5" in session.screen().text,
+          "в карточке чека админ видит пароль")
+
     print("Баннеры подарков")
     for cb in (A(s="ck"), A(s="ck", a="banners"), A(s="ck", a="banner", v="g_rose")):
         await feed(cb_update(ADMIN, cb.pack()))

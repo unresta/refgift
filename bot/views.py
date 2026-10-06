@@ -7,7 +7,7 @@ from aiogram.types import InlineKeyboardButton as Btn, InlineKeyboardMarkup, Web
 from aiosqlite import Row
 
 from bot.callbacks import A, Shop, ShopBuy, U
-from bot.services.checks import Activation, CheckStatus
+from bot.services.checks import PASSWORD_LOCK, Activation, CheckStatus
 from bot.services.rewards import calc_progress
 from bot.services.shop import ShopItem
 from bot.settings import Settings
@@ -176,6 +176,15 @@ def top_screen(top: list[Row], my_rank: int | None, my_total: int, user_id: int)
 
 def activation_screen(act: Activation, settings: Settings) -> Screen:
     gift = (act.check["gift_emoji"] if act.check and act.check["gift_emoji"] else None) or settings.get("gift_emoji")
+    password_texts = {
+        CheckStatus.NEED_PASSWORD: f"🔐 <b>Чек на подарок {gift} защищён паролем</b>\n\nОтправь пароль сообщением 👇",
+        CheckStatus.WRONG_PASSWORD: f"❌ <b>Неверный пароль</b>\n\nПопробуй ещё раз — осталось попыток: "
+                                    f"<b>{act.attempts_left}</b>",
+        CheckStatus.LOCKED: f"⏳ <b>Слишком много неверных попыток</b>\n\nПопробуй через {PASSWORD_LOCK // 60} минут — "
+                            "открой чек по ссылке ещё раз.",
+    }
+    if act.status in password_texts:
+        return password_texts[act.status], kb(back_to_menu())
     goal = settings.goal
     more = f"\n\n💡 Хочешь ещё? Пригласи <b>{goal}</b> {plural(goal, 'друга', 'друзей', 'друзей')} — и получи {settings.get('gift_emoji')}!"
     texts = {

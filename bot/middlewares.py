@@ -84,3 +84,13 @@ class SubscriptionGate(BaseMiddleware):
                 answer.text = "📢 Сначала подпишись на каналы"
         await show(event, text, kb)
         return None
+
+
+class ClearUserInput(BaseMiddleware):
+    """Любая кнопка пользовательского меню отменяет ожидание ввода (например, пароля от чека)."""
+
+    async def __call__(self, handler: Handler, event: TelegramObject, data: dict[str, Any]) -> Any:
+        state = data.get("state")
+        if state is not None and await state.get_state() is not None:
+            await state.clear()
+        return await handler(event, data)

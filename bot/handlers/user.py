@@ -4,6 +4,8 @@ from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import CommandObject, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (CallbackQuery, ChatJoinRequest, ChatMemberUpdated, LabeledPrice, Message,
                            PreCheckoutQuery)
 from aiogram.types import InlineKeyboardButton as Btn
@@ -13,7 +15,7 @@ from aiosqlite import Row
 from bot.callbacks import A, Shop, ShopBuy, U
 from bot.database import Database
 from bot.services.admins import AdminRegistry
-from bot.services.checks import CHECK_PREFIX, CheckService, CheckStatus
+from bot.services.checks import CHECK_PREFIX, PASSWORD_MAX, CheckService, CheckStatus
 from bot.services.reminders import ReminderService
 from bot.services.rewards import ClaimResult, RewardService
 from bot.services.roulette import SPIN_PREFIX, RouletteService
@@ -39,6 +41,21 @@ router.callback_query.filter(F.message.chat.type == "private")
 service_router = Router(name="service")
 
 
+class CheckInput(StatesGroup):
+    password = State()  # ждём пароль от чека; в data — его код
+
+
+async def show_activation(event: Message | CallbackQuery, act, settings: Settings, state: FSMContext | None) -> None:
+    """Экран результата активации; для чека с паролем — переводит в ввод пароля."""
+    if state is not None:
+        if act.status in (CheckStatus.NEED_PASSWORD, CheckStatus.WRONG_PASSWORD):
+            await state.set_state(CheckInput.password)
+            await state.update_data(code=act.check["code"])
+        elif await state.get_state() == CheckInput.password.state:
+            await state.clear()
+    await show(event, *activation_screen(act, settings))
+
+
 async def open_menu(event: Message | CallbackQuery, user_id: int, db: Database, settings: Settings,
                     is_admin: bool) -> None:
     user = await db.get_user(user_id)
@@ -51,7 +68,7 @@ async def open_menu(event: Message | CallbackQuery, user_id: int, db: Database, 
 
 async def pass_gate(event: Message | CallbackQuery, user_id: int, db: Database, settings: Settings,
                     subs: SubscriptionService, rewards: RewardService, checks: CheckService,
-                    is_admin: bool) -> list[Row]:
+                    is_admin: bool, state: FSMContext | None = None) -> list[Row]:
     """Проверяет подписку без кэша. Нет подписки — экран подписки; есть — активируем ждущий чек или открываем меню.
 
     Возвращает список каналов, на которые пользователь ещё не подписан.
@@ -64,7 +81,7 @@ async def pass_gate(event: Message | CallbackQuery, user_id: int, db: Database, 
             await show(event, *subscribe_screen(settings, user["full_name"], act.missing,
                                                 for_check=act.available))
             return act.missing
-        await show(event, *activation_screen(act, settings))
+        await show_activation(event, act, settings, state)
         return []
 
     missing = await subs.missing(user_id, use_cache=False)
@@ -79,7 +96,8 @@ async def pass_gate(event: Message | CallbackQuery, user_id: int, db: Database, 
 @router.message(CommandStart(), flags={"skip_sub": True})
 async def cmd_start(message: Message, command: CommandObject, user: Row, is_new: bool, db: Database,
                     settings: Settings, subs: SubscriptionService, rewards: RewardService, checks: CheckService,
-                    reminders: ReminderService, is_admin: bool) -> None:
+                    reminders: ReminderService, is_admin: bool, state: FSMContext) -> None:
+    await state.clear()
     args = (command.args or "").strip()
     if args.startswith(CHECK_PREFIX):
         code = args.removeprefix(CHECK_PREFIX)
@@ -95,7 +113,7 @@ async def cmd_start(message: Message, command: CommandObject, user: Row, is_new:
         referrer_id = int(args[1:])
         if referrer_id != user["user_id"] and await db.get_user(referrer_id):
             await db.set_referrer(user["user_id"], referrer_id)
-    missing = await pass_gate(message, user["user_id"], db, settings, subs, rewards, checks, is_admin)
+    missing = await pass_gate(message, user["user_id"], db, settings, subs, rewards, checks, is_admin, state)
     if missing:
         await reminders.on_start(await db.get_user(user["user_id"]))
 
@@ -103,9 +121,9 @@ async def cmd_start(message: Message, command: CommandObject, user: Row, is_new:
 @router.callback_query(U.filter(F.a == "gift_cta"), flags={"skip_sub": True})
 async def gift_cta(call: CallbackQuery, callback_answer: CallbackAnswer, user: Row, db: Database,
                    settings: Settings, subs: SubscriptionService, rewards: RewardService, checks: CheckService,
-                   is_admin: bool) -> None:
+                   is_admin: bool, state: FSMContext) -> None:
     """Кнопка из напоминания: ведёт на обязательную подписку (или в меню, если уже подписан)."""
-    missing = await pass_gate(call, user["user_id"], db, settings, subs, rewards, checks, is_admin)
+    missing = await pass_gate(call, user["user_id"], db, settings, subs, rewards, checks, is_admin, state)
     callback_answer.text = ("📢 Подпишись на каналы — и подарок твой!" if missing
                             else "✅ Подписка уже есть — забирай подарок в меню")
 
@@ -113,8 +131,8 @@ async def gift_cta(call: CallbackQuery, callback_answer: CallbackAnswer, user: R
 @router.callback_query(U.filter(F.a == "check"), flags={"skip_sub": True})
 async def check_subscription(call: CallbackQuery, callback_answer: CallbackAnswer, user: Row, db: Database,
                              settings: Settings, subs: SubscriptionService, rewards: RewardService,
-                             checks: CheckService, is_admin: bool) -> None:
-    missing = await pass_gate(call, user["user_id"], db, settings, subs, rewards, checks, is_admin)
+                             checks: CheckService, is_admin: bool, state: FSMContext) -> None:
+    missing = await pass_gate(call, user["user_id"], db, settings, subs, rewards, checks, is_admin, state)
     if missing:
         names = ", ".join(ch["title"] for ch in missing)
         callback_answer.text = f"❌ Ты ещё не подписан: {names}"[:200]
@@ -270,6 +288,18 @@ async def cb_buy(call: CallbackQuery, callback_data: ShopBuy, callback_answer: C
 @router.callback_query(U.filter(F.a == "noop"))
 async def cb_noop(call: CallbackQuery) -> None:
     pass
+
+
+@router.message(CheckInput.password, F.text, ~F.text.startswith("/"))
+async def on_check_password(message: Message, state: FSMContext, user: Row, settings: Settings,
+                            checks: CheckService) -> None:
+    code = (await state.get_data()).get("code", "")
+    act = await checks.activate(user["user_id"], code, password=message.text[:PASSWORD_MAX])
+    if act.status is CheckStatus.NEED_SUB:  # отписался, пока вводил пароль
+        await state.clear()
+        await show(message, *subscribe_screen(settings, user["full_name"], act.missing, for_check=act.available))
+        return
+    await show_activation(message, act, settings, state)
 
 
 @router.message()

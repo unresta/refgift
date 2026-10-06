@@ -242,6 +242,7 @@ MIGRATIONS = [
     ("nft_gifts", "chat_link_slug", "TEXT"),
     ("shop_orders", "comment", "TEXT"),
     ("nft_gifts", "emoji_id", "TEXT"),      # премиум-эмодзи — иконка на кнопке подарка
+    ("checks", "password", "TEXT"),         # пароль чека (NULL — без пароля)
 ]
 POST_MIGRATION_SQL = """
 CREATE INDEX IF NOT EXISTS idx_users_ad_link ON users(ad_link_id, created_at);
@@ -698,24 +699,26 @@ class Database:
 
     # ---------- чеки ----------
     async def create_check(self, code: str, total: int, caption: str | None, with_photo: bool,
-                           created_by: int, gift_id: str, gift_emoji: str, gift_price: int) -> int:
+                           created_by: int, gift_id: str, gift_emoji: str, gift_price: int,
+                           password: str | None = None) -> int:
         cur = await self.conn.execute(
             "INSERT INTO checks (code, total, caption, with_photo, created_by, created_at, gift_id, gift_emoji, "
-            "gift_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (code, total, caption, int(with_photo), created_by, now(), gift_id, gift_emoji, gift_price),
+            "gift_price, password) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (code, total, caption, int(with_photo), created_by, now(), gift_id, gift_emoji, gift_price, password),
         )
         await self.conn.commit()
         return cur.lastrowid or 0
 
     async def find_draft_check(self, created_by: int, total: int, caption: str | None, with_photo: bool,
-                               gift_id: str, max_age: int = 600) -> aiosqlite.Row | None:
+                               gift_id: str, password: str | None = None,
+                               max_age: int = 600) -> aiosqlite.Row | None:
         """Неотправленный чек с теми же параметрами — чтобы не плодить черновики на каждое нажатие клавиши."""
         return await self.one(
             "SELECT * FROM checks WHERE created_by = ? AND is_sent = 0 AND total = ? AND caption IS ? "
-            "AND with_photo = ? AND gift_id = ? AND created_at >= ? "
+            "AND with_photo = ? AND gift_id = ? AND password IS ? AND created_at >= ? "
             "AND NOT EXISTS (SELECT 1 FROM check_activations a WHERE a.check_id = checks.id) "
             "ORDER BY id DESC LIMIT 1",
-            created_by, total, caption, int(with_photo), gift_id, now() - max_age,
+            created_by, total, caption, int(with_photo), gift_id, password, now() - max_age,
         )
 
     async def cleanup_check_drafts(self, max_age: int = 86400) -> int:
