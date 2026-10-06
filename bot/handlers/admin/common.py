@@ -73,6 +73,8 @@ class Input(StatesGroup):
     nft_contact = State()
     nft_link_text = State()
     ub_reply = State()
+    shop_price = State()
+    shop_name = State()
 
 
 def btn(text: str, s: str, a: str = "open", id: int = 0, p: int = 0, v: str = "",

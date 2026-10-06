@@ -18,7 +18,7 @@ MAX_TOPUP = 10_000
 # откуда пришли — туда и кнопка «Назад»
 ORIGINS = {"": ("home", "open", "« В админку"), "gifts": ("st", "gifts", "« К подаркам"),
            "cl": ("cl", "open", "« К заявкам"), "ck": ("ck", "open", "« К чекам"),
-           "cgift": ("cgift", "open", "« К подарку на канал")}
+           "cgift": ("cgift", "open", "« К подарку на канал"), "shop": ("shop", "open", "« К магазину")}
 
 
 async def balance_screen(bot: Bot, db: Database, settings: Settings, origin: str):

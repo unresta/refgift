@@ -6,9 +6,10 @@ from urllib.parse import quote
 from aiogram.types import InlineKeyboardButton as Btn, InlineKeyboardMarkup, WebAppInfo
 from aiosqlite import Row
 
-from bot.callbacks import A, U
+from bot.callbacks import A, Shop, U
 from bot.services.checks import Activation, CheckStatus
 from bot.services.rewards import calc_progress
+from bot.services.shop import ShopItem
 from bot.settings import Settings
 from bot.utils import esc, plural, render_template
 
@@ -49,7 +50,7 @@ def subscribe_screen(settings: Settings, name: str, missing: list[Row], for_chec
 
 
 def menu_screen(user: Row, settings: Settings, has_pending_claim: bool, is_admin: bool,
-                has_nft: bool = False) -> Screen:
+                has_nft: bool = False, has_shop: bool = False) -> Screen:
     p = calc_progress(user, settings)
     friends = plural(p.left, "друга", "друзей", "друзей")
 
@@ -78,6 +79,8 @@ def menu_screen(user: Row, settings: Settings, has_pending_claim: bool, is_admin
                      callback_data=U(a="invite").pack())])
     rows.append([Btn(text="👥 Мои друзья", callback_data=U(a="friends").pack()),
                  Btn(text="🏆 Топ", callback_data=U(a="top").pack())])
+    if has_shop:
+        rows.append([Btn(text="🛍 Купить подарок", callback_data=U(a="shop").pack())])
     if settings.webapp_url and settings.flag("roulette_enabled"):
         rows.append([Btn(text="🎰 Рулетка подарков", web_app=WebAppInfo(url=settings.webapp_url))])
     if has_nft:
@@ -250,3 +253,22 @@ def nft_card_screen(gift: Row, settings: Settings, contact_base: str) -> Screen:
         rows.append([Btn(text="🔍 Посмотреть подарок", url=gift["link"])])
     rows.append([Btn(text="« К подаркам", callback_data=U(a="nft").pack())])
     return "\n".join(lines), kb(*rows)
+
+
+# ---------- магазин подарков ----------
+
+def shop_screen(items: list[ShopItem], settings: Settings) -> Screen:
+    buttons = [Btn(text=f"{i.emoji} {i.name} - {i.price} ⭐", style=i.style, callback_data=Shop(g=i.id).pack())
+               for i in items]
+    text = settings.get("text_shop")
+    if not buttons:
+        text += "\n\n<i>Подарков пока нет — загляни чуть позже.</i>"
+    return text, kb(*[buttons[n:n + 2] for n in range(0, len(buttons), 2)], back_to_menu())
+
+
+def shop_done_screen(emoji: str, name: str) -> Screen:
+    return (f"🎉 <b>Подарок отправлен!</b>\n\n{emoji} {esc(name).capitalize()} уже у тебя — "
+            "загляни в свой профиль → «Подарки»."), kb(
+        [Btn(text="🛍 Купить ещё", style="primary", callback_data=U(a="shop").pack())],
+        back_to_menu(),
+    )

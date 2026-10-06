@@ -14,3 +14,8 @@ class A(CallbackData, prefix="a"):
     id: int = 0
     p: int = 0
     v: str = ""
+
+
+class Shop(CallbackData, prefix="sh"):
+    """Покупка подарка в магазине: g — id подарка Telegram."""
+    g: str

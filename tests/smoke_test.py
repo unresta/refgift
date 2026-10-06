@@ -42,6 +42,7 @@ class FakeSession(BaseSession):
         self.calls: list[TelegramMethod] = []
         self.members: set[tuple[int, int]] = set()
         self.gift_error: str | None = None
+        self.balance = 100
 
     async def close(self) -> None:
         pass
@@ -84,7 +85,7 @@ class FakeSession(BaseSession):
         if isinstance(method, GetChatMemberCount):
             return 1234
         if isinstance(method, GetMyStarBalance):
-            return StarAmount(amount=100)
+            return StarAmount(amount=self.balance)
         if isinstance(method, SendGift):
             if self.gift_error:
                 raise TelegramBadRequest(method=method, message=self.gift_error)
@@ -636,6 +637,83 @@ async def scenario(dp, db, bot, session) -> None:
     await feed(cb_update(ADMIN, A(s="ub", a="reconnect").pack()))
     check(settings.get("userbot_reply") == "🎁 Админ скоро отправит вам подарок!"
           and "Всего: <b>4</b>" in session.screen().text, "сброс текста и переподключение без настроек")
+
+    print("Магазин подарков")
+    from bot.callbacks import Shop
+
+    async def shop_checkout(payload, amount):
+        await feed({"update_id": next(ids), "pre_checkout_query": {
+            "id": str(next(ids)), "currency": "XTR", "total_amount": amount, "invoice_payload": payload,
+            "from": {"id": 100, "is_bot": False, "first_name": "U"}}})
+        answer = session.by_type(AnswerPreCheckoutQuery)[-1]
+        return answer.ok, answer.error_message or ""
+
+    await feed(cb_update(100, U(a="menu").pack()))
+    check("Купить подарок" in str(session.screen().reply_markup), "в меню кнопка магазина")
+    await feed(cb_update(100, U(a="shop").pack()))
+    markup = str(session.screen().reply_markup)
+    check("🧸 мишка - 15 ⭐" in markup and "🌹" not in markup,
+          "по умолчанию — обычные подарки по цене Telegram, лимитированные скрыты")
+
+    await feed(cb_update(ADMIN, A(s="home").pack()))
+    check("Магазин подарков" in str(session.screen().reply_markup), "раздел магазина на дашборде")
+    await feed(cb_update(ADMIN, A(s="shop", a="price", id=8, v="g_bear").pack()))
+    check("Цена для покупателя: <b>8</b>" in session.screen().text and "продаётся в минус" in session.screen().text,
+          "цена ниже себестоимости — предупреждение в карточке")
+    await feed(cb_update(ADMIN, A(s="shop", a="toggle", v="g_rose").pack()))
+    await feed(cb_update(ADMIN, A(s="shop", a="name", v="g_rose").pack()))
+    await feed(msg_update(ADMIN, "розочка"))
+    await feed(cb_update(ADMIN, A(s="shop", a="pricein", v="g_rose").pack()))
+    await feed(msg_update(ADMIN, "abc"))
+    check("целое число" in session.texts_to(ADMIN)[-1], "неверная цена отклонена")
+    await feed(msg_update(ADMIN, "30"))
+    check("<b>+5</b> ⭐" in session.screen().text, "своя цена: прибыль +5 ⭐")
+    await feed(cb_update(ADMIN, A(s="shop").pack()))
+    check("в минус" in session.screen().text and "мишка — 8 ⭐ · −7" in str(session.screen().reply_markup),
+          "общий экран: прибыль по каждому подарку и предупреждение")
+
+    await feed(cb_update(100, U(a="shop").pack()))
+    rows = session.screen().reply_markup.inline_keyboard
+    check([b.text for b in rows[0]] == ["🧸 мишка - 8 ⭐", "🌹 розочка - 30 ⭐"], "кнопки по две в ряд, по цене")
+    await feed(cb_update(100, Shop(g="g_bear").pack()))
+    inv = session.by_type(SendInvoice)[-1]
+    check(inv.currency == "XTR" and inv.prices[0].amount == 8 and inv.payload == "shop:g_bear:8"
+          and inv.chat_id == 100, "счёт на 8 ⭐")
+    check((await shop_checkout("shop:g_bear:8", 8))[0] and not (await shop_checkout("shop:g_bear:8", 15))[0],
+          "pre_checkout: верная цена — ок, иначе отказ")
+    session.balance = 10
+    ok, error = await shop_checkout("shop:g_bear:8", 8)
+    session.balance = 100
+    check(not ok and "временно недоступен" in error and any("не хватает звёзд" in t for t in session.texts_to(ADMIN)),
+          "у бота мало звёзд — отказ до оплаты и уведомление админам")
+
+    gifts_before = len(session.by_type(SendGift))
+    await feed(payment_update(100, "shop:g_bear:8", 8, "shop_c1"))
+    gift = session.by_type(SendGift)[-1]
+    check(len(session.by_type(SendGift)) == gifts_before + 1 and gift.user_id == 100 and gift.gift_id == "g_bear"
+          and gift.text is None, "после оплаты подарок отправлен без подписи")
+    check("Подарок отправлен" in session.texts_to(100)[-1], "покупателю — сообщение с кнопкой «Купить ещё»")
+    await feed(payment_update(100, "shop:g_bear:8", 8, "shop_c1"))
+    check(len(session.by_type(SendGift)) == gifts_before + 1, "повтор того же платежа не дарит второй раз")
+
+    session.gift_error = "BALANCE_TOO_LOW"
+    await feed(payment_update(100, "shop:g_rose:30", 30, "shop_c2"))
+    session.gift_error = None
+    refund = session.by_type(RefundStarPayment)[-1]
+    check(refund.telegram_payment_charge_id == "shop_c2" and "30 ⭐ уже вернулись" in session.texts_to(100)[-1],
+          "не отправилось — звёзды вернулись автоматически")
+    check(any("подарок не отправлен" in t for t in session.texts_to(ADMIN)), "админы узнали об ошибке")
+
+    await feed(cb_update(ADMIN, A(s="shop", a="price", id=20, v="g_bear").pack()))
+    check(not (await shop_checkout("shop:g_bear:8", 8))[0], "цену изменили — старый счёт не оплатить")
+    await feed(cb_update(ADMIN, A(s="shop").pack()))
+    check("продаж <b>1</b> · выручка <b>8</b> ⭐ · прибыль <b>−7</b>" in session.screen().text
+          and "возвратов 1" in session.screen().text, "статистика продаж")
+    await feed(cb_update(ADMIN, A(s="shop", a="t").pack()))
+    await feed(cb_update(100, U(a="menu").pack()))
+    check("Купить подарок" not in str(session.screen().reply_markup)
+          and not (await shop_checkout("shop:g_bear:20", 20))[0], "магазин закрыт — ни кнопки, ни оплаты")
+    await feed(cb_update(ADMIN, A(s="shop", a="t").pack()))
 
     print("Рекламные ссылки")
     await feed(cb_update(ADMIN, A(s="lk").pack()))

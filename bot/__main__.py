@@ -22,6 +22,7 @@ from bot.services.checks import CheckService
 from bot.services.gifts import GiftCatalog, GiftImages
 from bot.services.reminders import ReminderService
 from bot.services.roulette import RouletteService
+from bot.services.shop import ShopService
 from bot.web.media import GiftMedia
 from bot.web.server import WebContext, create_app
 from bot.services.rewards import RewardService
@@ -57,6 +58,7 @@ async def build(config: Config, bot: Bot) -> tuple[Dispatcher, Database, AdminRe
         config=config, db=db, settings=settings, admins=admins, subs=subs,
         rewards=rewards, broadcaster=broadcaster, checks=checks, gift_images=gift_images, reminders=reminders,
         roulette=roulette, catalog=catalog, userbot=Userbot(config, db, settings),
+        shop=ShopService(bot, db, settings, rewards, catalog, admins),
         web=WebContext(bot, db, settings, subs, rewards, roulette, catalog, media, admins),
         bot_username=me.username,
     )

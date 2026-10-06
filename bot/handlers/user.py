@@ -4,24 +4,27 @@ from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandObject, CommandStart
-from aiogram.types import CallbackQuery, ChatJoinRequest, ChatMemberUpdated, Message, PreCheckoutQuery
+from aiogram.types import (CallbackQuery, ChatJoinRequest, ChatMemberUpdated, LabeledPrice, Message,
+                           PreCheckoutQuery)
 from aiogram.types import InlineKeyboardButton as Btn
 from aiogram.utils.callback_answer import CallbackAnswer
 from aiosqlite import Row
 
-from bot.callbacks import A, U
+from bot.callbacks import A, Shop, U
 from bot.database import Database
 from bot.services.admins import AdminRegistry
 from bot.services.checks import CHECK_PREFIX, CheckService, CheckStatus
 from bot.services.reminders import ReminderService
 from bot.services.rewards import ClaimResult, RewardService
 from bot.services.roulette import SPIN_PREFIX, RouletteService
+from bot.services.shop import PREFIX as SHOP_PREFIX, PayResult, ShopService
 from bot.services.subscription import SubscriptionService
 from bot.services.userbot import Userbot
 from bot.settings import Settings
 from bot.utils import esc, render_template, show, show_card
 from bot.views import (FRIENDS_PAGE, activation_screen, back_to_menu, friends_screen, invite_screen, kb, menu_screen,
-                       nft_card_screen, nft_contact_base, nft_list_screen, subscribe_screen, top_screen)
+                       nft_card_screen, nft_contact_base, nft_list_screen, shop_done_screen, shop_screen,
+                       subscribe_screen, top_screen)
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +44,8 @@ async def open_menu(event: Message | CallbackQuery, user_id: int, db: Database, 
     assert user is not None
     pending = await db.user_pending_claim(user_id)
     has_nft = await db.count_nft_gifts(only_active=True) > 0
-    await show(event, *menu_screen(user, settings, pending is not None, is_admin, has_nft))
+    await show(event, *menu_screen(user, settings, pending is not None, is_admin, has_nft,
+                                   settings.flag("shop_enabled")))
 
 
 async def pass_gate(event: Message | CallbackQuery, user_id: int, db: Database, settings: Settings,
@@ -187,6 +191,40 @@ async def cb_nft_gift(call: CallbackQuery, callback_data: U, callback_answer: Ca
     await show_card(call, text, markup, photo=gift["photo"], preview_url=gift["link"])
 
 
+@router.callback_query(U.filter(F.a == "shop"))
+async def cb_shop(call: CallbackQuery, callback_answer: CallbackAnswer, user: Row, db: Database, settings: Settings,
+                  shop: ShopService, is_admin: bool) -> None:
+    if not settings.flag("shop_enabled"):
+        callback_answer.text = "Магазин сейчас закрыт"
+        await open_menu(call, user["user_id"], db, settings, is_admin)
+        return
+    await show(call, *shop_screen(await shop.items(only_active=True), settings))
+
+
+@router.callback_query(Shop.filter())
+async def cb_buy(call: CallbackQuery, callback_data: Shop, callback_answer: CallbackAnswer, settings: Settings,
+                 shop: ShopService) -> None:
+    item = await shop.item(callback_data.g)
+    if not settings.flag("shop_enabled") or item is None or not item.active:
+        callback_answer.text = "Этот подарок больше не продаётся"
+        await show(call, *shop_screen(await shop.items(only_active=True), settings))
+        return
+    try:
+        await call.message.answer_invoice(
+            title=f"{item.emoji} {item.name.capitalize()}"[:32],
+            description="Подарок Telegram — придёт в твой профиль сразу после оплаты.",
+            payload=shop.payload(item),
+            currency="XTR",
+            prices=[LabeledPrice(label=f"{item.emoji} {item.name}", amount=item.price)],
+        )
+    except TelegramAPIError as e:
+        log.warning("Счёт магазина не создан: %s", e)
+        callback_answer.text = "Не удалось создать счёт — попробуй чуть позже"
+        callback_answer.show_alert = True
+        return
+    callback_answer.text = f"🧾 Оплати {item.price} ⭐ — и {item.emoji} сразу придёт тебе"
+
+
 @router.callback_query(U.filter(F.a == "noop"))
 async def cb_noop(call: CallbackQuery) -> None:
     pass
@@ -223,13 +261,33 @@ async def on_bot_status(update: ChatMemberUpdated, db: Database, admins: AdminRe
 
 
 @service_router.pre_checkout_query()
-async def on_pre_checkout(query: PreCheckoutQuery, roulette: RouletteService) -> None:
+async def on_pre_checkout(query: PreCheckoutQuery, roulette: RouletteService, shop: ShopService) -> None:
     payload = query.invoice_payload
+    if payload.startswith(SHOP_PREFIX):
+        error = await shop.validate(payload, query.total_amount)
+        await query.answer(ok=error is None, error_message=error)
+        return
     if payload.startswith(SPIN_PREFIX):
         ok = await roulette.validate_payment(query.from_user.id, payload, query.total_amount)
     else:
         ok = payload.startswith("topup:")
     await query.answer(ok=ok, error_message="Счёт устарел, откройте рулетку и попробуйте ещё раз.")
+
+
+@service_router.message(F.successful_payment, F.successful_payment.invoice_payload.startswith(SHOP_PREFIX))
+async def on_shop_payment(message: Message, shop: ShopService) -> None:
+    payment = message.successful_payment
+    purchase = await shop.on_paid(message.from_user.id, payment.invoice_payload, payment.total_amount,
+                                  payment.telegram_payment_charge_id)
+    if purchase.result is PayResult.SENT:
+        text, markup = shop_done_screen(purchase.emoji, purchase.name)
+        await message.answer(text, reply_markup=markup)
+    elif purchase.result is PayResult.REFUNDED:
+        await message.answer(f"😔 <b>Не получилось отправить подарок</b>\n\n{purchase.price} ⭐ уже вернулись "
+                             "на твой счёт. Попробуй чуть позже.", reply_markup=kb(back_to_menu()))
+    elif purchase.result is PayResult.FAILED:
+        await message.answer("😔 <b>Не получилось отправить подарок</b>\n\nМы уже знаем о проблеме — "
+                             "админ свяжется с тобой и всё решит.", reply_markup=kb(back_to_menu()))
 
 
 @service_router.message(F.successful_payment, F.successful_payment.invoice_payload.startswith(SPIN_PREFIX))

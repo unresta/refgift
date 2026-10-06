@@ -190,6 +190,28 @@ CREATE TABLE IF NOT EXISTS userbot_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_userbot_messages_created ON userbot_messages(created_at);
 
+CREATE TABLE IF NOT EXISTS shop_items (       -- настройки подарков магазина; нет строки — значения по умолчанию
+    gift_id   TEXT PRIMARY KEY,
+    name      TEXT,
+    price     INTEGER,
+    is_active INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS shop_orders (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    gift_id    TEXT    NOT NULL,
+    emoji      TEXT,
+    name       TEXT,
+    price      INTEGER NOT NULL,           -- заплатил покупатель
+    cost       INTEGER NOT NULL,           -- списано с баланса бота за подарок
+    status     TEXT    NOT NULL,           -- sent | refunded | failed
+    charge_id  TEXT    UNIQUE,
+    error      TEXT,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_shop_orders_created ON shop_orders(created_at);
+
 CREATE TABLE IF NOT EXISTS check_activations (
     check_id   INTEGER NOT NULL,
     user_id    INTEGER NOT NULL,
@@ -1007,6 +1029,43 @@ class Database:
         row = await self.one(
             "SELECT COUNT(*) AS messages, COUNT(DISTINCT user_id) AS users, COALESCE(SUM(stars), 0) AS stars "
             "FROM userbot_messages WHERE created_at >= ?", since,
+        )
+        assert row is not None
+        return row
+
+    # ---------- магазин подарков ----------
+    async def shop_overrides(self) -> dict[str, aiosqlite.Row]:
+        return {r["gift_id"]: r for r in await self.all("SELECT * FROM shop_items")}
+
+    async def set_shop_item(self, gift_id: str, **fields: Any) -> None:
+        assert set(fields) <= {"name", "price", "is_active"}, fields
+        await self.conn.execute("INSERT OR IGNORE INTO shop_items (gift_id) VALUES (?)", (gift_id,))
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        await self.conn.execute(f"UPDATE shop_items SET {sets} WHERE gift_id = ?", (*fields.values(), gift_id))
+        await self.conn.commit()
+
+    async def add_shop_order(self, user_id: int, gift_id: str, emoji: str, name: str, price: int, cost: int,
+                             charge_id: str) -> int | None:
+        """Новый заказ; None — этот платёж уже обработан."""
+        cur = await self.conn.execute(
+            "INSERT OR IGNORE INTO shop_orders (user_id, gift_id, emoji, name, price, cost, status, charge_id, "
+            "created_at) VALUES (?, ?, ?, ?, ?, ?, 'sent', ?, ?)",
+            (user_id, gift_id, emoji, name, price, cost, charge_id, now()),
+        )
+        await self.conn.commit()
+        return cur.lastrowid if cur.rowcount else None
+
+    async def set_shop_order_status(self, order_id: int, status: str, error: str | None = None) -> None:
+        await self.run("UPDATE shop_orders SET status = ?, error = ? WHERE id = ?", status, error, order_id)
+
+    async def shop_stats(self, since: int = 0, gift_id: str | None = None) -> aiosqlite.Row:
+        row = await self.one(
+            "SELECT COALESCE(SUM(status = 'sent'), 0) AS sold, "
+            "COALESCE(SUM(CASE WHEN status = 'sent' THEN price END), 0) AS revenue, "
+            "COALESCE(SUM(CASE WHEN status = 'sent' THEN cost END), 0) AS cost, "
+            "COALESCE(SUM(status != 'sent'), 0) AS refunded, COUNT(DISTINCT CASE WHEN status = 'sent' "
+            "THEN user_id END) AS buyers FROM shop_orders WHERE created_at >= ? AND (? IS NULL OR gift_id = ?)",
+            since, gift_id, gift_id,
         )
         assert row is not None
         return row
