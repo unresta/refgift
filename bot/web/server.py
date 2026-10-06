@@ -1,4 +1,5 @@
 """HTTP-сервер мини-аппа «Рулетка подарков»: статика + JSON API с проверкой подписи Telegram initData."""
+import hashlib
 import logging
 import time
 from dataclasses import dataclass
@@ -215,15 +216,35 @@ async def gift_media(request: web.Request) -> web.Response:
                         headers={"Cache-Control": "public, max-age=604800, immutable"})
 
 
-async def index(request: web.Request) -> web.FileResponse:
-    return web.FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+def versioned_index() -> str:
+    """index.html со ссылками вида /static/app.js?v=<хэш>: после обновления бота клиенты (WebView Telegram,
+    Cloudflare) не возьмут старый скрипт из кэша вместе с новой страницей."""
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    for name in ("app.js", "app.css"):
+        digest = hashlib.sha256((STATIC_DIR / name).read_bytes()).hexdigest()[:10]
+        html = html.replace(f'"/static/{name}"', f'"/static/{name}?v={digest}"')
+    return html
+
+
+async def index(request: web.Request) -> web.Response:
+    return web.Response(text=request.app["index_html"], content_type="text/html",
+                        headers={"Cache-Control": "no-cache"})
+
+
+async def static_headers(request: web.Request, response: web.StreamResponse) -> None:
+    """Статика с версией в ссылке не меняется — кэшируем надолго; без версии — всегда перепроверять."""
+    if request.path.startswith("/static/"):
+        response.headers["Cache-Control"] = ("public, max-age=31536000, immutable" if request.query.get("v")
+                                             else "no-cache")
 
 
 def create_app(ctx: WebContext) -> web.Application:
     app = web.Application(middlewares=[auth_middleware], client_max_size=64 * 1024)
     app["ctx"] = ctx
+    app["index_html"] = versioned_index()
+    app.on_response_prepare.append(static_headers)
     app.router.add_get("/", index)
-    app.router.add_static("/static/", STATIC_DIR, append_version=True)
+    app.router.add_static("/static/", STATIC_DIR)
     app.router.add_post("/api/init", api_init)
     app.router.add_post("/api/check_sub", api_check_sub)
     app.router.add_post("/api/spin", api_spin)

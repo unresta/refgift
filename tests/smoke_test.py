@@ -1181,7 +1181,17 @@ async def scenario(dp, db, bot, session) -> None:
         body = await r.json()
         check(r.status == 200 and body["fr"] == 60, "анимация подарка: .tgs распакован в Lottie JSON")
         r = await client.get("/")
-        check(r.status == 200 and "Мне повезёт" in await r.text(), "страница мини-аппа отдаётся")
+        page = await r.text()
+        check(r.status == 200 and "Мне повезёт" in page, "страница мини-аппа отдаётся")
+        import re as re_mod
+        js = re_mod.search(r'src="(/static/app\.js\?v=\w+)"', page)
+        css = re_mod.search(r'href="(/static/app\.css\?v=\w+)"', page)
+        check(js is not None and css is not None and r.headers["Cache-Control"] == "no-cache",
+              "скрипт и стили подключены с версией — после обновления кэш не мешает")
+        r = await client.get(js.group(1))
+        plain_js = await client.get("/static/app.js")
+        check(r.status == 200 and "immutable" in r.headers["Cache-Control"]
+              and plain_js.headers["Cache-Control"] == "no-cache", "версионная статика кэшируется, без версии — нет")
 
         print("  — выдача не удалась и возврат звёзд")
         session.gift_error = "BALANCE_TOO_LOW"
