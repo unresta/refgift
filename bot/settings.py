@@ -17,6 +17,8 @@ DEFAULTS: dict[str, str] = {
     "notify_referrer": "1",
     "maintenance": "0",
     "sub_cache_ttl": "60",
+    "cgift_text": "",               # подпись к подаркам на каналы из админки
+    "cgift_recent": "[]",           # недавние каналы-получатели: [[chat_id, title], ...]
 
     "check_photo": "",             # file_id картинки чека (загружается в админке)
     "check_caption": (

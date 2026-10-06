@@ -409,6 +409,34 @@ async def scenario(dp, db, bot, session) -> None:
     await feed(msg_update(ADMIN, "/start"))
     check(await dp.fsm.get_context(bot, ADMIN, ADMIN).get_state() is None, "/start прерывает ввод админа")
 
+    print("Подарки на каналы")
+    await feed(cb_update(ADMIN, A(s="home").pack()))
+    check("Подарок на канал" in str(session.screen().reply_markup), "кнопка на дашборде")
+    await feed(cb_update(ADMIN, A(s="cgift").pack()))
+    check("Private Chan" in str(session.screen().reply_markup), "каналы из подписки — в списке получателей")
+    await feed(cb_update(ADMIN, A(s="cgift", a="add").pack()))
+    await feed(msg_update(ADMIN, "@private_chan"))
+    check("🌹 25⭐" in str(session.screen().reply_markup) and "💎" not in str(session.screen().reply_markup),
+          "канал по @username — экран выбора подарка без premium")
+    check(settings.get("cgift_recent").startswith("[[-1002"), "канал запомнен в недавних")
+    await feed(cb_update(ADMIN, A(s="cgift", a="pick", id=-1002, p=3, v="g_rose").pack()))
+    check("Итого: <b>75</b>" in session.screen().text, "подтверждение: 3 × 25 ⭐")
+    await feed(cb_update(ADMIN, A(s="cgift", a="text", id=-1002, p=3, v="g_rose").pack()))
+    await feed(msg_update(ADMIN, "С любовью <3"))
+    check("Количество: <b>3</b>" in session.screen().text and "&lt;3" in session.screen().text,
+          "после подписи — снова подтверждение")
+    before = len(session.by_type(SendGift))
+    await feed(cb_update(ADMIN, A(s="cgift", a="send", id=-1002, p=3, v="g_rose").pack()))
+    sent = session.by_type(SendGift)[before:]
+    check(len(sent) == 3 and all(g.chat_id == -1002 and g.user_id is None and g.gift_id == "g_rose"
+                                 and g.text == "С любовью &lt;3" for g in sent), "3 подарка ушли на канал с подписью")
+    check("Отправлено: <b>3</b>" in session.screen().text, "итог отправки")
+    session.gift_error = "BALANCE_TOO_LOW"
+    await feed(cb_update(ADMIN, A(s="cgift", a="send", id=-1002, p=2, v="g_bear").pack()))
+    session.gift_error = None
+    check("Отправлено: <b>0</b>" in session.screen().text and "BALANCE_TOO_LOW" in session.screen().text,
+          "ошибка отправки показана админу")
+
     print("Рекламные ссылки")
     await feed(cb_update(ADMIN, A(s="lk").pack()))
     await feed(cb_update(ADMIN, A(s="lk", a="new").pack()))

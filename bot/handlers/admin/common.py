@@ -66,6 +66,8 @@ class Input(StatesGroup):
     rl_name = State()
     rl_price = State()
     rl_weight = State()
+    cgift_target = State()
+    cgift_text = State()
 
 
 def btn(text: str, s: str, a: str = "open", id: int = 0, p: int = 0, v: str = "",

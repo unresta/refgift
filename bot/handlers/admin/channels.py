@@ -207,7 +207,7 @@ async def cb_add(call: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-def _extract_target(message: Message) -> int | str | None:
+def extract_target(message: Message) -> int | str | None:
     if message.chat_shared:
         return message.chat_shared.chat_id
     origin = message.forward_origin
@@ -237,7 +237,7 @@ async def on_add_cancel(message: Message, state: FSMContext, db: Database, subs:
 @router.message(Input.channel)
 async def on_add(message: Message, state: FSMContext, bot: Bot, db: Database, config: Config,
                  subs: SubscriptionService) -> None:
-    target = _extract_target(message)
+    target = extract_target(message)
     if target is None:
         if message.text and ("/+" in message.text or "joinchat" in message.text):
             await message.answer("🔒 По ссылке-приглашению бот не может найти приватный канал.\n"
