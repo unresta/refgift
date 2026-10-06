@@ -444,8 +444,8 @@ async def scenario(dp, db, bot, session) -> None:
     await feed(cb_update(ADMIN, A(s="home").pack()))
     check("НФТ подарки" in str(session.screen().reply_markup), "раздел на дашборде")
     await feed(cb_update(ADMIN, A(s="nft").pack()))
-    check("не подключён" in session.screen().text and "не задана" in session.screen().text,
-          "юзербот не настроен, ссылки для связи нет — предупреждение")
+    check("не подключён" in session.screen().text and "Запасная ссылка: —" in session.screen().text,
+          "юзербот не настроен, запасной ссылки нет")
     await feed(cb_update(ADMIN, A(s="nft", a="add").pack()))
     await feed(msg_update(ADMIN, "https://t.me/nft/PlushPepe-1234"))
     nft = (await db.nft_gifts())[-1]
@@ -472,8 +472,9 @@ async def scenario(dp, db, bot, session) -> None:
     card = session.screen()
     urls = [b.url for row in card.reply_markup.inline_keyboard for b in row if b.url]
     check("Напиши админу" in card.text and "«Plush Pepe #1234»" in card.text, "карточка с инструкцией")
-    check(urls[0].startswith("https://t.me/nft_admin?text=") and "Plush%20Pepe" in urls[0],
-          "«Написать админу» — с готовым текстом про подарок")
+    check(urls[0] == "https://t.me/nft_admin?text=" + "%D0%9F%D1%80%D0%B8%D0%B2%D0%B5%D1%82%2C%20%D0%BE%D0%BF%D0%BB"
+          "%D0%B0%D1%82%D0%B0%20%D0%B7%D0%B0%20Plush%20Pepe%20%231234",
+          "без ссылки на чат — запасная ссылка с тем же готовым текстом")
     check(card.link_preview_options.url == nft["link"], "превью НФТ подарка по ссылке")
     check((await db.get_nft_gift(nft["id"]))["views"] == 1, "просмотр засчитан")
 
@@ -495,6 +496,7 @@ async def scenario(dp, db, bot, session) -> None:
     print("Юзербот")
     from types import SimpleNamespace
     from telethon.tl import types as tl
+    from bot.services.userbot import UbStatus
     userbot, replies = dp["userbot"], []
 
     def ub_event(uid, stars=0, **flags):
@@ -535,6 +537,100 @@ async def scenario(dp, db, bot, session) -> None:
     await feed(cb_update(ADMIN, A(s="ub", a="t", v="userbot_enabled").pack()))
     await userbot.on_message(ub_event(805, stars=50))
     check(len(replies) == 3, "автоответ выключен — молчит")
+
+    print("  — ссылки на чат для НФТ подарков")
+    from telethon.errors import RPCError
+
+    class FakeTelethon:
+        def __init__(self):
+            self.requests, self.links, self.premium = [], {}, True
+
+        def is_connected(self):
+            return True
+
+        async def disconnect(self):
+            pass
+
+        def _link(self, slug, link, views=0):
+            return tl.BusinessChatLink(link=f"https://t.me/m/{slug}", message=link.message, views=views,
+                                       title=link.title)
+
+        async def __call__(self, req):
+            self.requests.append(req)
+            name = type(req).__name__
+            if name == "CreateBusinessChatLinkRequest":
+                if not self.premium:
+                    raise RPCError(req, "PREMIUM_ACCOUNT_REQUIRED", 403)
+                slug = f"L{len(self.requests)}"
+                self.links[slug] = req.link
+                return self._link(slug, req.link)
+            if name == "EditBusinessChatLinkRequest":
+                if req.slug not in self.links:
+                    raise RPCError(req, "CHATLINK_SLUG_EMPTY", 400)
+                self.links[req.slug] = req.link
+                return self._link(req.slug, req.link)
+            if name == "DeleteBusinessChatLinkRequest":
+                self.links.pop(req.slug, None)
+                return True
+            if name == "GetBusinessChatLinksRequest":
+                return tl.account.BusinessChatLinks(
+                    links=[self._link(slug, link, views=7) for slug, link in self.links.items()], chats=[], users=[])
+            if name == "GetGlobalPrivacySettingsRequest":
+                return tl.GlobalPrivacySettings(noncontact_peers_paid_stars=100)
+            raise AssertionError(name)
+
+    fake = FakeTelethon()
+    userbot.client, userbot.me = fake, tl.User(id=555, first_name="NFT", username="GiveNFTRobot")
+    userbot.status = UbStatus.ONLINE
+    await userbot.sync_nft_links(only_missing=True)  # как при подключении юзербота
+    pepe = await db.get_nft_gift(nft["id"])
+    check(pepe["chat_link"].startswith("https://t.me/m/")
+          and fake.links[pepe["chat_link_slug"]].message == "Привет, оплата за Plush Pepe #1234"
+          and fake.links[pepe["chat_link_slug"]].title == "💎 Plush Pepe #1234",
+          "при подключении юзербота у подарка появилась ссылка на чат с готовым сообщением")
+    await feed(cb_update(100, U(a="nftg", p=nft["id"]).pack()))
+    urls = [b.url for row in session.screen().reply_markup.inline_keyboard for b in row if b.url]
+    check(urls[0] == pepe["chat_link"], "«Написать админу» ведёт на ссылку подарка")
+    await feed(cb_update(ADMIN, A(s="nft", a="card", id=nft["id"]).pack()))
+    check("переходов: <b>7</b>" in session.screen().text, "в карточке — ссылка и число переходов")
+    await feed(cb_update(ADMIN, A(s="nft", a="add").pack()))
+    await feed(msg_update(ADMIN, "Swiss Watch"))
+    watch = (await db.nft_gifts())[-1]
+    check(watch["chat_link"] and "Ссылка на чат создана" in "".join(session.texts_to(ADMIN)[-2:]),
+          "новый подарок сразу получает ссылку")
+
+    await feed(cb_update(ADMIN, A(s="nft", a="edit", id=watch["id"], v="title").pack()))
+    before = len(fake.requests)
+    await feed(msg_update(ADMIN, "Swiss Watch #7"))
+    check("EditBusinessChatLinkRequest" in [type(r).__name__ for r in fake.requests[before:]]
+          and fake.links[watch["chat_link_slug"]].message == "Привет, оплата за Swiss Watch #7",
+          "переименование подарка обновляет ссылку")
+    await feed(cb_update(ADMIN, A(s="nft", a="msg").pack()))
+    await feed(msg_update(ADMIN, "Здравствуйте! Хочу оплатить {gift}"))
+    check(all(link.message.startswith("Здравствуйте! Хочу оплатить ") for link in fake.links.values())
+          and len(fake.links) == 2, "новый текст сообщения — обновлены все ссылки")
+
+    fake.links.pop(watch["chat_link_slug"])  # ссылку удалили в Telegram вручную
+    await feed(cb_update(ADMIN, A(s="nft", a="sync1", id=watch["id"]).pack()))
+    watch = await db.get_nft_gift(watch["id"])
+    check(watch["chat_link_slug"] in fake.links, "удалённая вручную ссылка пересоздаётся")
+    await feed(cb_update(ADMIN, A(s="nft", a="del_ok", id=watch["id"]).pack()))
+    check(watch["chat_link_slug"] not in fake.links, "удаление подарка удаляет его ссылку")
+
+    fake.premium = False
+    await feed(cb_update(ADMIN, A(s="nft", a="add").pack()))
+    await feed(msg_update(ADMIN, "Lol Pop"))
+    pop = (await db.nft_gifts())[-1]
+    await feed(cb_update(ADMIN, A(s="nft", a="card", id=pop["id"]).pack()))
+    check(pop["chat_link"] is None and "нужен Telegram Premium" in session.screen().text,
+          "без Premium — понятная ошибка в карточке")
+    await feed(cb_update(100, U(a="nftg", p=pop["id"]).pack()))
+    urls = [b.url for row in session.screen().reply_markup.inline_keyboard for b in row if b.url]
+    check(urls[0].startswith("https://t.me/nft_admin?text="), "без ссылки на чат — запасная ссылка")
+    await feed(cb_update(ADMIN, A(s="ub").pack()))
+    check("@GiveNFTRobot" in session.screen().text and "<b>100</b> ⭐" in session.screen().text,
+          "экран юзербота: аккаунт и цена сообщения")
+
     await feed(cb_update(ADMIN, A(s="ub", a="reset").pack()))
     await feed(cb_update(ADMIN, A(s="ub", a="t", v="userbot_enabled").pack()))
     await feed(cb_update(ADMIN, A(s="ub", a="reconnect").pack()))

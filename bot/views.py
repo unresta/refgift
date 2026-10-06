@@ -1,4 +1,5 @@
 """Экраны пользовательской части: текст + клавиатура."""
+import html
 import re
 from urllib.parse import quote
 
@@ -199,11 +200,15 @@ def nft_contact_base(settings: Settings, userbot_username: str | None) -> str:
     return settings.get("nft_contact_url") or (f"https://t.me/{userbot_username}" if userbot_username else "")
 
 
-def nft_contact_url(base: str, title: str) -> str:
-    """Для t.me/username — сразу с готовым текстом про выбранный подарок."""
+def nft_contact_url(gift: Row, settings: Settings, base: str) -> str:
+    """Своя ссылка на чат подарка; иначе запасная ссылка (для t.me/username — с тем же готовым текстом)."""
+    if gift["chat_link"]:
+        return gift["chat_link"]
     m = USERNAME_URL_RE.fullmatch(base)
     if m:
-        return f"https://t.me/{m.group(1)}?text={quote(f'Привет! Хочу НФТ подарок «{title}» 🎁', safe='')}"
+        text = html.unescape(re.sub(r"<[^>]+>", "", render_template(settings.get("nft_link_message"),
+                                                                     gift=gift["title"])))
+        return f"https://t.me/{m.group(1)}?text={quote(text, safe='')}"
     return base
 
 
@@ -239,9 +244,8 @@ def nft_card_screen(gift: Row, settings: Settings, contact_base: str) -> Screen:
     lines.append("\n" + render_template(settings.get("text_nft_howto"), gift=f"«{title}»"))
 
     rows: list[list[Btn]] = []
-    if contact_base:
-        rows.append([Btn(text="✍️ Написать админу", style="success",
-                         url=nft_contact_url(contact_base, gift["title"]))])
+    if contact := nft_contact_url(gift, settings, contact_base):
+        rows.append([Btn(text="✍️ Написать админу", style="success", url=contact)])
     if gift["link"]:
         rows.append([Btn(text="🔍 Посмотреть подарок", url=gift["link"])])
     rows.append([Btn(text="« К подаркам", callback_data=U(a="nft").pack())])

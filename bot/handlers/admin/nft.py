@@ -67,6 +67,7 @@ def ub_short(userbot: Userbot, settings: Settings) -> str:
 async def main_screen(db: Database, settings: Settings, userbot: Userbot):
     gifts = await db.nft_gifts()
     active = sum(g["is_active"] for g in gifts)
+    linked = sum(1 for g in gifts if g["chat_link"])
     contact = nft_contact_base(settings, userbot.username)
     auto = " <i>(юзербот)</i>" if contact and not settings.get("nft_contact_url") else ""
     lines = [
@@ -74,15 +75,21 @@ async def main_screen(db: Database, settings: Settings, userbot: Userbot):
         "В меню бота есть раздел «💎 НФТ подарки». Пользователь выбирает подарок и видит инструкцию: "
         "написать админу и ждать подарок.\n",
         f"🤖 Юзербот: {ub_short(userbot, settings)}",
-        f"✍️ «Написать админу»: {esc(contact) + auto if contact else '⚠️ <b>не задана</b> — кнопки не будет'}",
         f"🎁 Подарков: <b>{len(gifts)}</b> · показываются: <b>{active}</b>",
+        f"🔗 Ссылки на чат: <b>{linked}</b> из {len(gifts)} — у каждого подарка своя, с готовым сообщением",
+        f"💬 Сообщение: «{render_template(settings.get('nft_link_message'), gift='<i>название</i>')}»",
+        f"✍️ Запасная ссылка: {esc(contact) + auto if contact else '—'}",
     ]
+    if gifts and linked < len(gifts):
+        lines.append("\n⚠️ <i>Не у всех подарков есть ссылка на чат — для них кнопка «Написать админу» "
+                     "ведёт на запасную ссылку. Подключите юзербота и нажмите «🔄 Обновить ссылки».</i>")
     if not active:
         lines.append("\n<i>Кнопка «💎 НФТ подарки» появится в меню, когда будет хотя бы один видимый подарок.</i>")
     rows = [[btn(f"{'🟢' if g['is_active'] else '🔴'} {g['title']}" + (f" · {g['price']}" if g["price"] else ""),
                  "nft", "card", id=g["id"])] for g in gifts]
     rows.append([btn("➕ Добавить подарок", "nft", "add", style="success")])
-    rows.append([btn("🤖 Юзербот", "ub"), btn("✍️ Ссылка для связи", "nft", "contact")])
+    rows.append([btn("💬 Текст сообщения", "nft", "msg"), btn("🔄 Обновить ссылки", "nft", "sync")])
+    rows.append([btn("🤖 Юзербот", "ub"), btn("✍️ Запасная ссылка", "nft", "contact")])
     rows.append(back())
     return "\n".join(lines), kb(*rows)
 
@@ -94,14 +101,20 @@ async def cb_open(call: CallbackQuery, db: Database, settings: Settings, userbot
 
 # ---------- карточка подарка ----------
 
-def card_screen(g: Row):
+def card_screen(g: Row, link_views: dict[str, int] | None = None, link_error: str | None = None):
     gid = g["id"]
+    if g["chat_link"]:
+        clicks = (link_views or {}).get(g["chat_link_slug"])
+        chat_link = esc(g["chat_link"]) + (f" · переходов: <b>{fmt_num(clicks)}</b>" if clicks is not None else "")
+    else:
+        chat_link = f"⚠️ нет ({esc(link_error)})" if link_error else "⚠️ нет — подключите юзербота"
     picture = "загружена" if g["photo"] else ("превью ссылки" if g["link"] else "—")
     lines = [
         f"💎 <b>{esc(g['title'])}</b>\n",
         f"💰 Цена: {esc(g['price']) if g['price'] else '—'}",
         f"📝 Описание: {'есть' if g['description'] else '—'}",
-        f"🔗 Ссылка: {esc(g['link']) if g['link'] else '—'}",
+        f"🔗 Ссылка на подарок: {esc(g['link']) if g['link'] else '—'}",
+        f"💬 Ссылка на чат: {chat_link}",
         f"🖼 Картинка: {picture}",
         f"👁 Открыли: <b>{fmt_num(g['views'])}</b> раз",
         f"Статус: {'🟢 показывается пользователям' if g['is_active'] else '🔴 скрыт'}",
@@ -120,7 +133,8 @@ def card_screen(g: Row):
         [edit("photo"), btn("👁 Как видит пользователь", "nft", "preview", id=gid, style="primary")],
         [btn("🔴 Скрыть" if g["is_active"] else "🟢 Показать", "nft", "toggle", id=gid),
          btn("⬆️ Выше", "nft", "up", id=gid)],
-        [btn("🗑 Удалить", "nft", "del", id=gid, style="danger")],
+        [btn("🔄 Обновить ссылку на чат", "nft", "sync1", id=gid),
+         btn("🗑 Удалить", "nft", "del", id=gid, style="danger")],
         back("nft", text="« К НФТ подаркам"),
     )
 
@@ -133,7 +147,8 @@ async def open_card(event: CallbackQuery | Message, db: Database, settings: Sett
             callback_answer.text = "Подарок не найден"
         await show(event, *await main_screen(db, settings, userbot))
         return
-    await show(event, *card_screen(g))
+    views = await userbot.chat_link_views() if g["chat_link"] else {}
+    await show(event, *card_screen(g, views, userbot.link_errors.get(g["id"])))
 
 
 @router.callback_query(A.filter((F.s == "nft") & (F.a == "card")))
@@ -165,7 +180,7 @@ async def cb_preview(call: CallbackQuery, callback_data: A, callback_answer: Cal
     await send_card(bot, call.from_user.id, text, markup, g["photo"], g["link"])
     callback_answer.text = "👆 Так карточку видит пользователь"
     # админскую карточку — заново под превью, чтобы продолжить редактирование
-    text, markup = card_screen(g)
+    text, markup = card_screen(g, link_error=userbot.link_errors.get(g["id"]))
     await call.message.answer(text, reply_markup=markup)
     try:
         await call.message.delete()
@@ -188,7 +203,10 @@ async def cb_delete_confirm(call: CallbackQuery, callback_data: A, db: Database)
 @router.callback_query(A.filter((F.s == "nft") & (F.a == "del_ok")))
 async def cb_delete(call: CallbackQuery, callback_data: A, callback_answer: CallbackAnswer, db: Database,
                     settings: Settings, userbot: Userbot) -> None:
-    await db.delete_nft_gift(callback_data.id)
+    g = await db.get_nft_gift(callback_data.id)
+    if g:
+        await userbot.delete_nft_link(g["chat_link_slug"])
+        await db.delete_nft_gift(g["id"])
     callback_answer.text = "🗑 Подарок удалён"
     await show(call, *await main_screen(db, settings, userbot))
 
@@ -221,8 +239,10 @@ async def on_add(message: Message, state: FSMContext, db: Database, settings: Se
     await drop_prompt(message, state)
     await state.clear()
     gift_id = await db.create_nft_gift(title, link)
+    error = await userbot.sync_nft_link(gift_id)
     await message.answer(f"✅ Подарок «{esc(title)}» добавлен и уже виден пользователям.\n"
-                         "Добавьте цену и описание 👇")
+                         + ("🔗 Ссылка на чат создана.\n" if not error else f"⚠️ Ссылка на чат не создана: {esc(error)}\n")
+                         + "Добавьте цену и описание 👇")
     await open_card(message, db, settings, userbot, gift_id)
 
 
@@ -276,18 +296,73 @@ async def on_edit_text(message: Message, state: FSMContext, db: Database, settin
     await drop_prompt(message, state)
     await state.clear()
     await db.update_nft_gift(data["gift_id"], **{field: value})
+    if field == "title":  # название есть в сообщении ссылки на чат — обновим её
+        await userbot.sync_nft_link(data["gift_id"])
     await message.answer("✅ Сохранено")
     await open_card(message, db, settings, userbot, data["gift_id"])
 
 
-# ---------- ссылка «Написать админу» ----------
+# ---------- ссылки на чат ----------
+
+@router.callback_query(A.filter((F.s == "nft") & (F.a == "sync1")))
+async def cb_sync_one(call: CallbackQuery, callback_data: A, callback_answer: CallbackAnswer, db: Database,
+                      settings: Settings, userbot: Userbot) -> None:
+    error = await userbot.sync_nft_link(callback_data.id)
+    callback_answer.text = f"❌ {error}"[:200] if error else "🔗 Ссылка на чат обновлена"
+    callback_answer.show_alert = bool(error)
+    await open_card(call, db, settings, userbot, callback_data.id, callback_answer)
+
+
+@router.callback_query(A.filter((F.s == "nft") & (F.a == "sync")))
+async def cb_sync(call: CallbackQuery, callback_answer: CallbackAnswer, db: Database, settings: Settings,
+                  userbot: Userbot) -> None:
+    if not userbot.online:
+        callback_answer.text = "Юзербот не подключён — откройте «🤖 Юзербот»"
+        callback_answer.show_alert = True
+        return
+    ok, failed = await userbot.sync_nft_links()
+    callback_answer.text = f"🔗 Обновлено ссылок: {ok}" + (f", с ошибкой: {failed}" if failed else "")
+    callback_answer.show_alert = bool(failed)
+    await show(call, *await main_screen(db, settings, userbot))
+
+
+@router.callback_query(A.filter((F.s == "nft") & (F.a == "msg")))
+async def cb_link_message(call: CallbackQuery, state: FSMContext, settings: Settings) -> None:
+    await prompt(call, state, Input.nft_link_text,
+                 "💬 <b>Сообщение в ссылке на чат</b>\n\n"
+                 f"Сейчас: «{settings.get('nft_link_message')}»\n\n"
+                 "Этот текст подставится в поле ввода, когда пользователь откроет чат по ссылке подарка — "
+                 "ему останется нажать «Отправить».\n\n"
+                 "Переменная: <code>{gift}</code> — название подарка. Пример: <code>Привет, оплата за {gift}</code>\n"
+                 "<i>После сохранения ссылки всех подарков обновятся.</i>",
+                 back("nft", text="✖️ Отмена"))
+
+
+@router.message(Input.nft_link_text, F.text)
+async def on_link_message(message: Message, state: FSMContext, db: Database, settings: Settings,
+                          userbot: Userbot) -> None:
+    if len(message.text) > 500:
+        await message.answer(f"⚠️ Слишком длинно: {len(message.text)}/500 символов")
+        return
+    await drop_prompt(message, state)
+    await state.clear()
+    await settings.set("nft_link_message", message.html_text)
+    ok, failed = await userbot.sync_nft_links() if userbot.online else (0, 0)
+    note = (f"🔗 Обновлено ссылок: {ok}" + (f", с ошибкой: {failed}" if failed else "") if userbot.online
+            else "⚠️ Юзербот не подключён — ссылки обновятся, когда он подключится и вы нажмёте «🔄 Обновить ссылки»")
+    await message.answer(f"✅ Сообщение сохранено\n{note}")
+    await show(message, *await main_screen(db, settings, userbot))
+
+
+# ---------- запасная ссылка «Написать админу» ----------
 
 @router.callback_query(A.filter((F.s == "nft") & (F.a == "contact")))
 async def cb_contact(call: CallbackQuery, state: FSMContext, settings: Settings, userbot: Userbot) -> None:
     current = settings.get("nft_contact_url")
     auto = f"https://t.me/{userbot.username}" if userbot.username else None
     await prompt(call, state, Input.nft_contact,
-                 "✍️ <b>Кнопка «Написать админу»</b>\n\n"
+                 "✍️ <b>Запасная ссылка «Написать админу»</b>\n\n"
+                 "Используется для подарков, у которых ещё нет своей ссылки на чат.\n\n"
                  f"Сейчас: {esc(current) if current else (esc(auto) + ' <i>(юзербот)</i>' if auto else '—')}\n\n"
                  "Пришлите <code>@username</code> или ссылку — по ней пользователь напишет админу.\n"
                  "Для <code>@username</code> бот сам подставит в сообщение название выбранного подарка.\n\n"

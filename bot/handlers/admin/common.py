@@ -71,6 +71,7 @@ class Input(StatesGroup):
     nft_add = State()
     nft_field = State()
     nft_contact = State()
+    nft_link_text = State()
     ub_reply = State()
 
 

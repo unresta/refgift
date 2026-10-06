@@ -9,6 +9,8 @@ from enum import StrEnum
 from pathlib import Path
 
 from telethon import TelegramClient, events
+from telethon.errors import RPCError
+from telethon.extensions import html as tl_html
 from telethon.sessions import StringSession
 from telethon.tl import functions, types
 
@@ -23,6 +25,7 @@ logging.getLogger("telethon").setLevel(logging.WARNING)
 DEVICE = "RefGift userbot"
 SERVICE_ID = 777000   # служебные уведомления Telegram
 COOLDOWN = 3.0        # сек: на альбом из нескольких фото — один ответ
+LINK_TITLE_MAX = 32   # название ссылки в списке «Ссылки на чат»
 
 
 def session_path(db_path: str) -> Path:
@@ -50,6 +53,7 @@ class Userbot:
         self.me: types.User | None = None
         self.paid_stars: int | None = None  # цена сообщения от не-контактов: 0 — бесплатно, None — неизвестно
         self._last: dict[int, float] = {}
+        self.link_errors: dict[int, str] = {}  # id НФТ подарка → почему не удалось создать ссылку на чат
         self._lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
 
@@ -94,6 +98,7 @@ class Userbot:
                 return
             log.info("Юзербот подключён: %s (@%s)", self.me.first_name, self.me.username)
         await self.refresh_paid()
+        await self.sync_nft_links(only_missing=True)  # подарки, добавленные, пока юзербот был отключён
 
     async def refresh_paid(self) -> None:
         if not self.online:
@@ -103,6 +108,71 @@ class Userbot:
             self.paid_stars = privacy.noncontact_peers_paid_stars or 0
         except Exception as e:
             log.debug("Не удалось получить цену сообщений: %s", e)
+
+    # ---------- ссылки на чат (Telegram Business) для НФТ подарков ----------
+
+    def link_message(self, title: str) -> str:
+        """HTML первого сообщения для ссылки подарка."""
+        return render_template(self.settings.get("nft_link_message"), gift=esc(title))
+
+    async def sync_nft_link(self, gift_id: int) -> str | None:
+        """Создаёт или обновляет ссылку на чат для подарка. Возвращает текст ошибки или None."""
+        gift = await self.db.get_nft_gift(gift_id)
+        if gift is None:
+            return "подарок не найден"
+        if not self.online:
+            return "юзербот не подключён"
+        message, entities = tl_html.parse(self.link_message(gift["title"]))
+        link = types.InputBusinessChatLink(message=message, entities=entities or None,
+                                           title=f"💎 {gift['title']}"[:LINK_TITLE_MAX])
+        try:
+            result = None
+            if gift["chat_link_slug"]:
+                try:
+                    result = await self.client(functions.account.EditBusinessChatLinkRequest(
+                        slug=gift["chat_link_slug"], link=link))
+                except RPCError as e:  # ссылку удалили в Telegram вручную — создадим новую
+                    log.info("Ссылка %s не обновилась (%s), создаю новую", gift["chat_link_slug"], e)
+            if result is None:
+                result = await self.client(functions.account.CreateBusinessChatLinkRequest(link=link))
+        except RPCError as e:
+            error = "нужен Telegram Premium на аккаунте юзербота" if "PREMIUM" in str(e).upper() else str(e)
+            self.link_errors[gift_id] = error
+            log.warning("Не удалось создать ссылку на чат для подарка %s: %s", gift_id, e)
+            return error
+        self.link_errors.pop(gift_id, None)
+        await self.db.update_nft_gift(gift_id, chat_link=result.link, chat_link_slug=result.link.rsplit("/", 1)[-1])
+        return None
+
+    async def sync_nft_links(self, only_missing: bool = False) -> tuple[int, int]:
+        """Ссылки для всех подарков. Возвращает (успешно, с ошибкой)."""
+        ok = failed = 0
+        for gift in await self.db.nft_gifts():
+            if only_missing and gift["chat_link"]:
+                continue
+            if await self.sync_nft_link(gift["id"]):
+                failed += 1
+            else:
+                ok += 1
+        return ok, failed
+
+    async def delete_nft_link(self, slug: str | None) -> None:
+        if not slug or not self.online:
+            return
+        try:
+            await self.client(functions.account.DeleteBusinessChatLinkRequest(slug=slug))
+        except RPCError as e:
+            log.info("Ссылка %s не удалена: %s", slug, e)
+
+    async def chat_link_views(self) -> dict[str, int]:
+        """Сколько раз открыли каждую ссылку: slug → переходы."""
+        if not self.online:
+            return {}
+        try:
+            links = (await self.client(functions.account.GetBusinessChatLinksRequest())).links
+        except RPCError:
+            return {}
+        return {link.link.rsplit("/", 1)[-1]: link.views for link in links}
 
     async def stop(self) -> None:
         if self._task:
