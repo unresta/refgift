@@ -486,6 +486,32 @@ async def scenario(dp, db, bot, session) -> None:
     first = session.screen().reply_markup.inline_keyboard[0][0]
     check(first.icon_custom_emoji_id == "5368324170671202286" and first.text == "Plush Pepe #1234 · 1 500 ⭐",
           "кнопка подарка с премиум-эмодзи")
+    def custom(offset, emoji_id):
+        return {"type": "custom_emoji", "offset": offset, "length": 2, "custom_emoji_id": emoji_id}
+
+    await feed(cb_update(ADMIN, A(s="nft", a="add").pack()))
+    await feed(msg_update(ADMIN, "🐸 Жаба Кепка", entities=[custom(0, "111")]))
+    frog = (await db.nft_gifts())[-1]
+    check(frog["title"] == "Жаба Кепка" and frog["emoji_id"] == "111"
+          and any("стал иконкой" in t for t in session.texts_to(ADMIN)[-2:]),
+          "добавление с премиум-эмодзи: эмодзи — иконка, в названии его нет")
+    await feed(cb_update(ADMIN, A(s="nft", a="edit", id=frog["id"], v="title").pack()))
+    await feed(msg_update(ADMIN, "Жаба 🎩 Кепка 🐸", entities=[custom(5, "222"), custom(14, "333")]))
+    frog = await db.get_nft_gift(frog["id"])
+    check(frog["title"] == "Жаба Кепка" and frog["emoji_id"] == "222", "переименование: первый премиум-эмодзи — иконка")
+    await feed(cb_update(ADMIN, A(s="nft", a="edit", id=frog["id"], v="title").pack()))
+    await feed(msg_update(ADMIN, "Жаба в кепке"))
+    check((await db.get_nft_gift(frog["id"]))["emoji_id"] == "222", "название без эмодзи — иконка прежняя")
+    await feed(cb_update(ADMIN, A(s="nft", a="add").pack()))
+    await feed(msg_update(ADMIN, "🐸", entities=[custom(0, "444")]))
+    check("нужно название" in session.texts_to(ADMIN)[-1], "только эмодзи без названия — просим название")
+    await feed(msg_update(ADMIN, "🐸 https://t.me/nft/SwissWatch-55", entities=[custom(0, "555")]))
+    watch = (await db.nft_gifts())[-1]
+    check(watch["title"] == "Swiss Watch #55" and watch["emoji_id"] == "555"
+          and watch["link"] == "https://t.me/nft/SwissWatch-55", "ссылка с премиум-эмодзи тоже работает")
+    for g in (frog, watch):
+        await db.delete_nft_gift(g["id"])
+
     session.reject_icons = True
     await feed(cb_update(100, U(a="nft").pack()))
     session.reject_icons = False

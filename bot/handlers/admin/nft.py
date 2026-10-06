@@ -28,7 +28,8 @@ UB_FLAGS = {"userbot_enabled", "userbot_paid_only"}
 
 # поле → (подпись, подсказка, лимит символов)
 FIELDS = {
-    "title": ("✏️ Название", "Пришлите название подарка — до 64 символов.", 64),
+    "title": ("✏️ Название", "Пришлите название подарка — до 64 символов. Премиум-эмодзи в нём станет "
+                            "иконкой кнопки (без него иконка останется прежней).", 64),
     "price": ("💰 Цена", "Пришлите цену так, как её увидит пользователь: например «1 500 ⭐» или «25 TON».\n"
                         "«-» — убрать цену.", 32),
     "description": ("📝 Описание", "Пришлите описание — до 500 символов. Форматирование Telegram сохранится.\n"
@@ -42,6 +43,19 @@ FIELDS = {
     "photo": ("🖼 Картинка", "Пришлите картинку подарка (как фото). Она покажется в карточке вместо превью ссылки.\n"
                             "«-» — убрать картинку.", 0),
 }
+
+
+def split_premium_emoji(message: Message) -> tuple[str, str | None]:
+    """Текст без премиум-эмодзи и id первого из них (иконка кнопки).
+
+    Смещения сущностей Telegram — в UTF-16, поэтому режем по UTF-16.
+    """
+    data = message.text.encode("utf-16-le")
+    emojis = [e for e in message.entities or [] if e.type == "custom_emoji"]
+    for e in sorted(emojis, key=lambda e: e.offset, reverse=True):
+        data = data[:e.offset * 2] + data[(e.offset + e.length) * 2:]
+    text = " ".join(data.decode("utf-16-le").split())
+    return text, emojis[0].custom_emoji_id if emojis else None
 
 
 def title_from_link(slug: str, number: str) -> str:
@@ -223,7 +237,8 @@ async def cb_delete(call: CallbackQuery, callback_data: A, callback_answer: Call
 async def cb_add(call: CallbackQuery, state: FSMContext) -> None:
     await prompt(call, state, Input.nft_add,
                  "➕ <b>Новый НФТ подарок</b>\n\n"
-                 "Пришлите название подарка — или ссылку на него, например "
+                 "Пришлите название подарка — можно сразу с премиум-эмодзи, например «🐸 Plush Pepe»: "
+                 "эмодзи станет иконкой кнопки. Или ссылку на подарок, например "
                  "<code>https://t.me/nft/PlushPepe-1234</code>: название подставится само, "
                  "а в карточке будет превью подарка.\n\n"
                  "Цену, описание и картинку добавите следующим шагом.",
@@ -232,7 +247,10 @@ async def cb_add(call: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(Input.nft_add, F.text)
 async def on_add(message: Message, state: FSMContext, db: Database, settings: Settings, userbot: Userbot) -> None:
-    raw = message.text.strip()
+    raw, emoji_id = split_premium_emoji(message)
+    if not raw:
+        await message.answer("⚠️ Кроме эмодзи нужно название — например «🐸 Plush Pepe»")
+        return
     link = None
     if m := NFT_LINK_RE.match(raw):
         link = f"https://t.me/nft/{m.group(1)}-{m.group(2)}"
@@ -245,8 +263,11 @@ async def on_add(message: Message, state: FSMContext, db: Database, settings: Se
     await drop_prompt(message, state)
     await state.clear()
     gift_id = await db.create_nft_gift(title, link)
+    if emoji_id:
+        await db.update_nft_gift(gift_id, emoji_id=emoji_id)
     error = await userbot.sync_nft_link(gift_id)
     await message.answer(f"✅ Подарок «{esc(title)}» добавлен и уже виден пользователям.\n"
+                         + ("✨ Премиум-эмодзи стал иконкой кнопки.\n" if emoji_id else "")
                          + ("🔗 Ссылка на чат создана.\n" if not error else f"⚠️ Ссылка на чат не создана: {esc(error)}\n")
                          + "Добавьте цену и описание 👇")
     await open_card(message, db, settings, userbot, gift_id)
@@ -303,6 +324,13 @@ async def on_edit_text(message: Message, state: FSMContext, db: Database, settin
             return
     elif field == "description":
         value = message.html_text.strip()
+    elif field == "title":
+        value, emoji_id = split_premium_emoji(message)
+        if not value:
+            await message.answer("⚠️ Кроме эмодзи нужно название")
+            return
+        if emoji_id:
+            await db.update_nft_gift(data["gift_id"], emoji_id=emoji_id)
     else:
         value = raw
     await drop_prompt(message, state)
