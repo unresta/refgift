@@ -58,7 +58,7 @@ async def build(config: Config, bot: Bot) -> tuple[Dispatcher, Database, AdminRe
         config=config, db=db, settings=settings, admins=admins, subs=subs,
         rewards=rewards, broadcaster=broadcaster, checks=checks, gift_images=gift_images, reminders=reminders,
         roulette=roulette, catalog=catalog, userbot=Userbot(config, db, settings),
-        shop=ShopService(bot, db, settings, rewards, catalog, admins),
+        shop=ShopService(bot, db, settings, rewards, catalog, admins, me.username),
         web=WebContext(bot, db, settings, subs, rewards, roulette, catalog, media, admins),
         bot_username=me.username,
     )

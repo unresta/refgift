@@ -75,6 +75,8 @@ class Input(StatesGroup):
     ub_reply = State()
     shop_price = State()
     shop_name = State()
+    shop_comment = State()
+    shop_comment_add = State()
 
 
 def btn(text: str, s: str, a: str = "open", id: int = 0, p: int = 0, v: str = "",

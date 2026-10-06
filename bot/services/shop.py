@@ -13,12 +13,14 @@ from bot.services.admins import AdminRegistry
 from bot.services.gifts import GiftCatalog, gift_emoji
 from bot.services.rewards import RewardService
 from bot.settings import Settings
-from bot.utils import esc
+from bot.utils import esc, render_template
 
 log = logging.getLogger(__name__)
 
 PREFIX = "shop:"
 MAX_PRICE = 10_000
+COMMENT_MAX = 128          # лимит Telegram на подпись к подарку
+MAX_COMMENTS = 20
 LOW_BALANCE_NOTICE = 3600  # не чаще раза в час напоминать админам, что звёзд не хватает
 
 # Обычные подарки Telegram — в магазине по умолчанию, в этом порядке.
@@ -69,12 +71,14 @@ class Purchase:
     emoji: str = "🎁"
     name: str = ""
     price: int = 0
+    comment: str = ""
 
 
 class ShopService:
     def __init__(self, bot: Bot, db: Database, settings: Settings, rewards: RewardService, catalog: GiftCatalog,
-                 admins: AdminRegistry) -> None:
+                 admins: AdminRegistry, bot_username: str) -> None:
         self.bot = bot
+        self.bot_username = bot_username
         self.db = db
         self.settings = settings
         self.rewards = rewards
@@ -102,20 +106,41 @@ class ShopService:
     async def item(self, gift_id: str) -> ShopItem | None:
         return next((i for i in await self.items() if i.id == gift_id), None)
 
-    @staticmethod
-    def payload(item: ShopItem) -> str:
-        return f"{PREFIX}{item.id}:{item.price}"
+    # ---------- комментарии ----------
 
-    async def _parse(self, payload: str) -> tuple[ShopItem | None, int]:
-        gift_id, _, price = payload.removeprefix(PREFIX).rpartition(":")
-        return await self.item(gift_id), int(price) if price.isdigit() else 0
+    def default_comment(self) -> str:
+        """Подпись к подарку по цене магазина (HTML, как в настройках)."""
+        return render_template(self.settings.get("shop_comment"), bot=f"@{self.bot_username}")
+
+    async def comment_text(self, comment_id: int) -> str | None:
+        """0 — наш комментарий, иначе — выбранный вариант своего (None, если его удалили)."""
+        if comment_id == 0:
+            return self.default_comment()
+        row = await self.db.get_shop_comment(comment_id)
+        return row["text"] if row else None
+
+    @staticmethod
+    def price_for(item: ShopItem, comment_id: int) -> int:
+        """С нашим комментарием — цена магазина, со своим — себестоимость."""
+        return item.price if comment_id == 0 else item.cost
+
+    def payload(self, item: ShopItem, comment_id: int = 0) -> str:
+        return f"{PREFIX}{item.id}:{self.price_for(item, comment_id)}:{comment_id}"
+
+    async def _parse(self, payload: str) -> tuple[str, ShopItem | None, int, int]:
+        """shop:<gift_id>:<цена>[:<комментарий>] → (gift_id, подарок, цена, комментарий)."""
+        gift_id, price, comment = (payload.removeprefix(PREFIX).split(":") + ["0"])[:3]
+        to_int = lambda v: int(v) if v.isdigit() else -1  # noqa: E731
+        return gift_id, await self.item(gift_id), to_int(price), to_int(comment)
 
     async def validate(self, payload: str, amount: int) -> str | None:
         """Проверка перед оплатой. Возвращает текст отказа или None."""
-        item, price = await self._parse(payload)
+        _, item, price, comment_id = await self._parse(payload)
         if not self.settings.flag("shop_enabled") or item is None or not item.active:
             return "Этот подарок больше не продаётся — откройте магазин заново."
-        if not price == amount == item.price:
+        if comment_id < 0 or await self.comment_text(comment_id) is None:
+            return "Этот вариант комментария больше недоступен — выберите другой."
+        if not price == amount == self.price_for(item, comment_id):
             return "Цена изменилась — откройте магазин и выберите подарок заново."
         try:
             balance = (await self.bot.get_my_star_balance()).amount
@@ -135,17 +160,18 @@ class ShopService:
             f"а на балансе бота {balance} ⭐ (нужно {item.cost} ⭐). Пополните баланс в /admin.")
 
     async def on_paid(self, user_id: int, payload: str, amount: int, charge_id: str) -> Purchase:
-        item, _ = await self._parse(payload)
-        gift_id = payload.removeprefix(PREFIX).rpartition(":")[0]
+        gift_id, item, _, comment_id = await self._parse(payload)
         emoji, name = (item.emoji, item.name) if item else ("🎁", "подарок")
+        # вариант удалили между проверкой и оплатой — отправим с нашим комментарием
+        comment = await self.comment_text(max(0, comment_id)) or self.default_comment()
         order_id = await self.db.add_shop_order(user_id, gift_id, emoji, name, amount,
-                                                item.cost if item else 0, charge_id)
+                                                item.cost if item else 0, charge_id, comment)
         if order_id is None:
-            return Purchase(PayResult.DUPLICATE, emoji, name, amount)
+            return Purchase(PayResult.DUPLICATE, emoji, name, amount, comment)
 
-        error = await self.rewards.send_gift(user_id, gift_id, with_text=False)
+        error = await self.rewards.send_gift(user_id, gift_id, text=comment)
         if error is None:
-            return Purchase(PayResult.SENT, emoji, name, amount)
+            return Purchase(PayResult.SENT, emoji, name, amount, comment)
 
         log.warning("Магазин: подарок %s для %s не отправлен: %s", gift_id, user_id, error)
         try:
@@ -160,4 +186,4 @@ class ShopService:
             f"<code>{user_id}</code>\nОшибка: <code>{esc(error)}</code>\n"
             + ("↩️ Звёзды возвращены покупателю." if result is PayResult.REFUNDED
                else "❗️ Звёзды вернуть не удалось — свяжитесь с покупателем."))
-        return Purchase(result, emoji, name, amount)
+        return Purchase(result, emoji, name, amount, comment)

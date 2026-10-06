@@ -639,7 +639,7 @@ async def scenario(dp, db, bot, session) -> None:
           and "Всего: <b>4</b>" in session.screen().text, "сброс текста и переподключение без настроек")
 
     print("Магазин подарков")
-    from bot.callbacks import Shop
+    from bot.callbacks import Shop, ShopBuy
 
     async def shop_checkout(payload, amount):
         await feed({"update_id": next(ids), "pre_checkout_query": {
@@ -658,7 +658,7 @@ async def scenario(dp, db, bot, session) -> None:
     await feed(cb_update(ADMIN, A(s="home").pack()))
     check("Магазин подарков" in str(session.screen().reply_markup), "раздел магазина на дашборде")
     await feed(cb_update(ADMIN, A(s="shop", a="price", id=8, v="g_bear").pack()))
-    check("Цена для покупателя: <b>8</b>" in session.screen().text and "продаётся в минус" in session.screen().text,
+    check("Цена с нашим комментарием: <b>8</b>" in session.screen().text and "продаётся в минус" in session.screen().text,
           "цена ниже себестоимости — предупреждение в карточке")
     await feed(cb_update(ADMIN, A(s="shop", a="toggle", v="g_rose").pack()))
     await feed(cb_update(ADMIN, A(s="shop", a="name", v="g_rose").pack()))
@@ -676,28 +676,33 @@ async def scenario(dp, db, bot, session) -> None:
     rows = session.screen().reply_markup.inline_keyboard
     check([b.text for b in rows[0]] == ["🧸 мишка - 8 ⭐", "🌹 розочка - 30 ⭐"], "кнопки по две в ряд, по цене")
     await feed(cb_update(100, Shop(g="g_bear").pack()))
+    card = session.screen()
+    check("С нашим комментарием · 8 ⭐" in str(card.reply_markup) and "Свой комментарий" not in str(card.reply_markup)
+          and "Подарки дешевле, чем в Telegram — @test_bot" in card.text,
+          "карточка: наш комментарий виден заранее, без вариантов — только он")
+    await feed(cb_update(100, ShopBuy(g="g_bear", c=0).pack()))
     inv = session.by_type(SendInvoice)[-1]
-    check(inv.currency == "XTR" and inv.prices[0].amount == 8 and inv.payload == "shop:g_bear:8"
-          and inv.chat_id == 100, "счёт на 8 ⭐")
-    check((await shop_checkout("shop:g_bear:8", 8))[0] and not (await shop_checkout("shop:g_bear:8", 15))[0],
-          "pre_checkout: верная цена — ок, иначе отказ")
+    check(inv.currency == "XTR" and inv.prices[0].amount == 8 and inv.payload == "shop:g_bear:8:0"
+          and inv.chat_id == 100 and "Подарки дешевле" in inv.description, "счёт на 8 ⭐ с нашим комментарием")
+    check((await shop_checkout("shop:g_bear:8:0", 8))[0] and not (await shop_checkout("shop:g_bear:8:0", 15))[0]
+          and (await shop_checkout("shop:g_bear:8", 8))[0], "pre_checkout: верная цена — ок, иначе отказ; старые счета работают")
     session.balance = 10
-    ok, error = await shop_checkout("shop:g_bear:8", 8)
+    ok, error = await shop_checkout("shop:g_bear:8:0", 8)
     session.balance = 100
     check(not ok and "временно недоступен" in error and any("не хватает звёзд" in t for t in session.texts_to(ADMIN)),
           "у бота мало звёзд — отказ до оплаты и уведомление админам")
 
     gifts_before = len(session.by_type(SendGift))
-    await feed(payment_update(100, "shop:g_bear:8", 8, "shop_c1"))
+    await feed(payment_update(100, "shop:g_bear:8:0", 8, "shop_c1"))
     gift = session.by_type(SendGift)[-1]
     check(len(session.by_type(SendGift)) == gifts_before + 1 and gift.user_id == 100 and gift.gift_id == "g_bear"
-          and gift.text is None, "после оплаты подарок отправлен без подписи")
+          and gift.text == "🎁 Подарки дешевле, чем в Telegram — @test_bot", "после оплаты подарок с нашим комментарием")
     check("Подарок отправлен" in session.texts_to(100)[-1], "покупателю — сообщение с кнопкой «Купить ещё»")
-    await feed(payment_update(100, "shop:g_bear:8", 8, "shop_c1"))
+    await feed(payment_update(100, "shop:g_bear:8:0", 8, "shop_c1"))
     check(len(session.by_type(SendGift)) == gifts_before + 1, "повтор того же платежа не дарит второй раз")
 
     session.gift_error = "BALANCE_TOO_LOW"
-    await feed(payment_update(100, "shop:g_rose:30", 30, "shop_c2"))
+    await feed(payment_update(100, "shop:g_rose:30:0", 30, "shop_c2"))
     session.gift_error = None
     refund = session.by_type(RefundStarPayment)[-1]
     check(refund.telegram_payment_charge_id == "shop_c2" and "30 ⭐ уже вернулись" in session.texts_to(100)[-1],
@@ -705,14 +710,47 @@ async def scenario(dp, db, bot, session) -> None:
     check(any("подарок не отправлен" in t for t in session.texts_to(ADMIN)), "админы узнали об ошибке")
 
     await feed(cb_update(ADMIN, A(s="shop", a="price", id=20, v="g_bear").pack()))
-    check(not (await shop_checkout("shop:g_bear:8", 8))[0], "цену изменили — старый счёт не оплатить")
+    check(not (await shop_checkout("shop:g_bear:8:0", 8))[0], "цену изменили — старый счёт не оплатить")
+
+    print("  — свой комментарий по себестоимости")
+    await feed(cb_update(ADMIN, A(s="shop", a="comment").pack()))
+    await feed(msg_update(ADMIN, "Купил в {bot} <дёшево>"))
+    check(settings.get("shop_comment") == "Купил в {bot} &lt;дёшево&gt;"
+          and "Купил в @test_bot &lt;дёшево&gt;" in session.screen().text, "наш комментарий изменён, {bot} подставлен")
+    await feed(cb_update(ADMIN, A(s="shop", a="cmadd").pack()))
+    await feed(msg_update(ADMIN, "x" * 129))
+    check("129/128" in session.texts_to(ADMIN)[-1], "длиннее 128 символов нельзя")
+    await feed(msg_update(ADMIN, "С днём рождения! 🎉"))
+    await feed(cb_update(ADMIN, A(s="shop", a="cmadd").pack()))
+    await feed(msg_update(ADMIN, "Люблю тебя ❤️"))
+    comments = await db.shop_comments()
+    check([c["text"] for c in comments] == ["С днём рождения! 🎉", "Люблю тебя ❤️"]
+          and "🗑 2. Люблю тебя" in str(session.screen().reply_markup), "варианты своего комментария добавлены")
+
+    await feed(cb_update(100, Shop(g="g_bear").pack()))
+    check("Свой комментарий · 15 ⭐" in str(session.screen().reply_markup)
+          and "С нашим комментарием · 20 ⭐" in str(session.screen().reply_markup), "две цены: наша и себестоимость")
+    await feed(cb_update(100, ShopBuy(g="g_bear", c=-1).pack()))
+    check("Люблю тебя ❤️" in session.screen().text and "15 ⭐" in session.screen().text, "список вариантов")
+    await feed(cb_update(100, ShopBuy(g="g_bear", c=comments[1]["id"]).pack()))
+    inv = session.by_type(SendInvoice)[-1]
+    payload = f"shop:g_bear:15:{comments[1]['id']}"
+    check(inv.prices[0].amount == 15 and inv.payload == payload and "Люблю тебя" in inv.description,
+          "свой комментарий — счёт по себестоимости")
+    check((await shop_checkout(payload, 15))[0] and not (await shop_checkout(f"shop:g_bear:20:{comments[1]['id']}", 20))[0]
+          and not (await shop_checkout("shop:g_bear:15:999", 15))[0], "pre_checkout: свой — только по себестоимости")
+    await feed(payment_update(100, payload, 15, "shop_c3"))
+    check(session.by_type(SendGift)[-1].text == "Люблю тебя ❤️" and "Люблю тебя" in session.texts_to(100)[-1],
+          "подарок ушёл с выбранным комментарием")
+    await feed(cb_update(ADMIN, A(s="shop", a="cmdel", id=comments[1]["id"]).pack()))
+    check(not (await shop_checkout(payload, 15))[0], "удалённый вариант больше не оплатить")
     await feed(cb_update(ADMIN, A(s="shop").pack()))
-    check("продаж <b>1</b> · выручка <b>8</b> ⭐ · прибыль <b>−7</b>" in session.screen().text
+    check("продаж <b>2</b> · выручка <b>23</b> ⭐ · прибыль <b>−7</b>" in session.screen().text
           and "возвратов 1" in session.screen().text, "статистика продаж")
     await feed(cb_update(ADMIN, A(s="shop", a="t").pack()))
     await feed(cb_update(100, U(a="menu").pack()))
     check("Купить подарок" not in str(session.screen().reply_markup)
-          and not (await shop_checkout("shop:g_bear:20", 20))[0], "магазин закрыт — ни кнопки, ни оплаты")
+          and not (await shop_checkout("shop:g_bear:20:0", 20))[0], "магазин закрыт — ни кнопки, ни оплаты")
     await feed(cb_update(ADMIN, A(s="shop", a="t").pack()))
 
     print("Рекламные ссылки")

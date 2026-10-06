@@ -6,7 +6,7 @@ from urllib.parse import quote
 from aiogram.types import InlineKeyboardButton as Btn, InlineKeyboardMarkup, WebAppInfo
 from aiosqlite import Row
 
-from bot.callbacks import A, Shop, U
+from bot.callbacks import A, Shop, ShopBuy, U
 from bot.services.checks import Activation, CheckStatus
 from bot.services.rewards import calc_progress
 from bot.services.shop import ShopItem
@@ -266,9 +266,40 @@ def shop_screen(items: list[ShopItem], settings: Settings) -> Screen:
     return text, kb(*[buttons[n:n + 2] for n in range(0, len(buttons), 2)], back_to_menu())
 
 
-def shop_done_screen(emoji: str, name: str) -> Screen:
+def plain(html_text: str, limit: int | None = None) -> str:
+    """HTML-текст для кнопки: без тегов, с обрезкой."""
+    text = html.unescape(re.sub(r"<[^>]+>", "", html_text))
+    return text if limit is None or len(text) <= limit else text[:limit - 1] + "…"
+
+
+def shop_item_screen(item: ShopItem, default_comment: str, has_comments: bool) -> Screen:
+    lines = [f"{item.emoji} <b>{esc(item.name).capitalize()}</b>\n", "Как подписать подарок?\n",
+             f"💬 <b>С нашим комментарием — {item.price} ⭐</b>", f"<blockquote>{default_comment}</blockquote>"]
+    rows = [[Btn(text=f"💬 С нашим комментарием · {item.price} ⭐", style="success",
+                 callback_data=ShopBuy(g=item.id, c=0).pack())]]
+    if has_comments:
+        lines += [f"\n✍️ <b>Со своим комментарием — {item.cost} ⭐</b>", "Выбери текст из готовых вариантов."]
+        rows.append([Btn(text=f"✍️ Свой комментарий · {item.cost} ⭐", style="primary",
+                         callback_data=ShopBuy(g=item.id, c=-1).pack())])
+    rows.append([Btn(text="« К подаркам", callback_data=U(a="shop").pack())])
+    return "\n".join(lines), kb(*rows)
+
+
+def shop_comments_screen(item: ShopItem, comments: list[Row]) -> Screen:
+    lines = [f"✍️ <b>Свой комментарий</b> к {item.emoji} {esc(item.name)} — <b>{item.cost} ⭐</b>\n",
+             "Выбери текст — подарок придёт с ним:\n"]
+    rows = []
+    for n, c in enumerate(comments, 1):
+        lines.append(f"<b>{n}.</b> {c['text']}")
+        rows.append([Btn(text=f"{n}. {plain(c['text'], 40)}", callback_data=ShopBuy(g=item.id, c=c["id"]).pack())])
+    rows.append([Btn(text="« Назад", callback_data=Shop(g=item.id).pack())])
+    return "\n".join(lines), kb(*rows)
+
+
+def shop_done_screen(emoji: str, name: str, comment: str) -> Screen:
     return (f"🎉 <b>Подарок отправлен!</b>\n\n{emoji} {esc(name).capitalize()} уже у тебя — "
-            "загляни в свой профиль → «Подарки»."), kb(
+            "загляни в свой профиль → «Подарки»."
+            + (f"\n\n💬 Подпись: <blockquote>{comment}</blockquote>" if comment else "")), kb(
         [Btn(text="🛍 Купить ещё", style="primary", callback_data=U(a="shop").pack())],
         back_to_menu(),
     )

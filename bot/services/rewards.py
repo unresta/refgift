@@ -120,16 +120,19 @@ class RewardService:
             log.debug("Не удалось уведомить реферера %s: %s", referrer_id, e)
 
     # ---------- награды ----------
-    async def send_gift(self, user_id: int, gift_id: str | None = None, with_text: bool = True) -> str | None:
+    async def send_gift(self, user_id: int, gift_id: str | None = None, with_text: bool = True,
+                        text: str | None = None) -> str | None:
         """Отправляет подарок Telegram за звёзды бота. Возвращает текст ошибки или None.
 
-        with_text=False — без подписи (выигрыши рулетки).
+        with_text=False — без подписи (выигрыши рулетки); text — своя подпись вместо настроек.
         """
+        if text is None and with_text:
+            text = self.settings.get("gift_text") or None
         try:
             await self.bot.send_gift(
                 gift_id=gift_id or self.settings.get("gift_id"),
                 user_id=user_id,
-                text=(self.settings.get("gift_text") or None) if with_text else None,
+                text=text,
             )
         except TelegramAPIError as e:
             log.warning("send_gift(%s) failed: %s", user_id, e)

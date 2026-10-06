@@ -197,6 +197,12 @@ CREATE TABLE IF NOT EXISTS shop_items (       -- настройки подарк
     is_active INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS shop_comments (    -- варианты своего комментария (подарок по себестоимости)
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    text       TEXT    NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS shop_orders (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id    INTEGER NOT NULL,
@@ -234,6 +240,7 @@ MIGRATIONS = [
     ("claims", "spin_id", "INTEGER"),
     ("nft_gifts", "chat_link", "TEXT"),       # ссылка на чат с юзерботом (Telegram Business) с готовым сообщением
     ("nft_gifts", "chat_link_slug", "TEXT"),
+    ("shop_orders", "comment", "TEXT"),
 ]
 POST_MIGRATION_SQL = """
 CREATE INDEX IF NOT EXISTS idx_users_ad_link ON users(ad_link_id, created_at);
@@ -1044,13 +1051,25 @@ class Database:
         await self.conn.execute(f"UPDATE shop_items SET {sets} WHERE gift_id = ?", (*fields.values(), gift_id))
         await self.conn.commit()
 
+    async def shop_comments(self) -> list[aiosqlite.Row]:
+        return await self.all("SELECT * FROM shop_comments ORDER BY id")
+
+    async def get_shop_comment(self, comment_id: int) -> aiosqlite.Row | None:
+        return await self.one("SELECT * FROM shop_comments WHERE id = ?", comment_id)
+
+    async def add_shop_comment(self, text: str) -> None:
+        await self.run("INSERT INTO shop_comments (text, created_at) VALUES (?, ?)", text, now())
+
+    async def delete_shop_comment(self, comment_id: int) -> None:
+        await self.run("DELETE FROM shop_comments WHERE id = ?", comment_id)
+
     async def add_shop_order(self, user_id: int, gift_id: str, emoji: str, name: str, price: int, cost: int,
-                             charge_id: str) -> int | None:
+                             charge_id: str, comment: str | None = None) -> int | None:
         """Новый заказ; None — этот платёж уже обработан."""
         cur = await self.conn.execute(
             "INSERT OR IGNORE INTO shop_orders (user_id, gift_id, emoji, name, price, cost, status, charge_id, "
-            "created_at) VALUES (?, ?, ?, ?, ?, ?, 'sent', ?, ?)",
-            (user_id, gift_id, emoji, name, price, cost, charge_id, now()),
+            "comment, created_at) VALUES (?, ?, ?, ?, ?, ?, 'sent', ?, ?, ?)",
+            (user_id, gift_id, emoji, name, price, cost, charge_id, comment, now()),
         )
         await self.conn.commit()
         return cur.lastrowid if cur.rowcount else None

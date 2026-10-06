@@ -10,7 +10,7 @@ from aiogram.types import InlineKeyboardButton as Btn
 from aiogram.utils.callback_answer import CallbackAnswer
 from aiosqlite import Row
 
-from bot.callbacks import A, Shop, U
+from bot.callbacks import A, Shop, ShopBuy, U
 from bot.database import Database
 from bot.services.admins import AdminRegistry
 from bot.services.checks import CHECK_PREFIX, CheckService, CheckStatus
@@ -23,7 +23,8 @@ from bot.services.userbot import Userbot
 from bot.settings import Settings
 from bot.utils import esc, render_template, show, show_card
 from bot.views import (FRIENDS_PAGE, activation_screen, back_to_menu, friends_screen, invite_screen, kb, menu_screen,
-                       nft_card_screen, nft_contact_base, nft_list_screen, shop_done_screen, shop_screen,
+                       nft_card_screen, nft_contact_base, nft_list_screen, plain, shop_comments_screen,
+                       shop_done_screen, shop_item_screen, shop_screen,
                        subscribe_screen, top_screen)
 
 log = logging.getLogger(__name__)
@@ -201,28 +202,57 @@ async def cb_shop(call: CallbackQuery, callback_answer: CallbackAnswer, user: Ro
     await show(call, *shop_screen(await shop.items(only_active=True), settings))
 
 
+async def shop_item_or_list(call: CallbackQuery, callback_answer: CallbackAnswer, gift_id: str,
+                            settings: Settings, shop: ShopService):
+    """Подарок из магазина; если он больше не продаётся — показывает список и возвращает None."""
+    item = await shop.item(gift_id)
+    if settings.flag("shop_enabled") and item is not None and item.active:
+        return item
+    callback_answer.text = "Этот подарок больше не продаётся"
+    await show(call, *shop_screen(await shop.items(only_active=True), settings))
+    return None
+
+
 @router.callback_query(Shop.filter())
-async def cb_buy(call: CallbackQuery, callback_data: Shop, callback_answer: CallbackAnswer, settings: Settings,
-                 shop: ShopService) -> None:
-    item = await shop.item(callback_data.g)
-    if not settings.flag("shop_enabled") or item is None or not item.active:
-        callback_answer.text = "Этот подарок больше не продаётся"
-        await show(call, *shop_screen(await shop.items(only_active=True), settings))
+async def cb_shop_item(call: CallbackQuery, callback_data: Shop, callback_answer: CallbackAnswer, db: Database,
+                       settings: Settings, shop: ShopService) -> None:
+    if item := await shop_item_or_list(call, callback_answer, callback_data.g, settings, shop):
+        await show(call, *shop_item_screen(item, shop.default_comment(), bool(await db.shop_comments())))
+
+
+@router.callback_query(ShopBuy.filter())
+async def cb_buy(call: CallbackQuery, callback_data: ShopBuy, callback_answer: CallbackAnswer, db: Database,
+                 settings: Settings, shop: ShopService) -> None:
+    item = await shop_item_or_list(call, callback_answer, callback_data.g, settings, shop)
+    if item is None:
         return
+    comments = await db.shop_comments()
+    if callback_data.c < 0:
+        if comments:
+            await show(call, *shop_comments_screen(item, comments))
+        else:
+            await show(call, *shop_item_screen(item, shop.default_comment(), False))
+        return
+    comment = await shop.comment_text(callback_data.c)
+    if comment is None:
+        callback_answer.text = "Этот вариант больше недоступен — выбери другой"
+        await show(call, *shop_item_screen(item, shop.default_comment(), bool(comments)))
+        return
+    price = shop.price_for(item, callback_data.c)
     try:
         await call.message.answer_invoice(
             title=f"{item.emoji} {item.name.capitalize()}"[:32],
-            description="Подарок Telegram — придёт в твой профиль сразу после оплаты.",
-            payload=shop.payload(item),
+            description=f"Подарок Telegram с подписью «{plain(comment, 200)}» — придёт сразу после оплаты.",
+            payload=shop.payload(item, callback_data.c),
             currency="XTR",
-            prices=[LabeledPrice(label=f"{item.emoji} {item.name}", amount=item.price)],
+            prices=[LabeledPrice(label=f"{item.emoji} {item.name}", amount=price)],
         )
     except TelegramAPIError as e:
         log.warning("Счёт магазина не создан: %s", e)
         callback_answer.text = "Не удалось создать счёт — попробуй чуть позже"
         callback_answer.show_alert = True
         return
-    callback_answer.text = f"🧾 Оплати {item.price} ⭐ — и {item.emoji} сразу придёт тебе"
+    callback_answer.text = f"🧾 Оплати {price} ⭐ — и {item.emoji} сразу придёт тебе"
 
 
 @router.callback_query(U.filter(F.a == "noop"))
@@ -280,7 +310,7 @@ async def on_shop_payment(message: Message, shop: ShopService) -> None:
     purchase = await shop.on_paid(message.from_user.id, payment.invoice_payload, payment.total_amount,
                                   payment.telegram_payment_charge_id)
     if purchase.result is PayResult.SENT:
-        text, markup = shop_done_screen(purchase.emoji, purchase.name)
+        text, markup = shop_done_screen(purchase.emoji, purchase.name, purchase.comment)
         await message.answer(text, reply_markup=markup)
     elif purchase.result is PayResult.REFUNDED:
         await message.answer(f"😔 <b>Не получилось отправить подарок</b>\n\n{purchase.price} ⭐ уже вернулись "

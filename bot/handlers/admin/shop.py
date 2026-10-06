@@ -9,9 +9,10 @@ from bot.config import Config
 from bot.database import Database
 from bot.handlers.admin.common import Input, back, btn, drop_prompt, kb, prompt
 from bot.handlers.admin.home import day_start, star_balance, topup_button
-from bot.services.shop import DEFAULT_NAMES, MAX_PRICE, ShopItem, ShopService
+from bot.services.shop import COMMENT_MAX, DEFAULT_NAMES, MAX_COMMENTS, MAX_PRICE, ShopItem, ShopService
 from bot.settings import Settings
-from bot.utils import esc, fmt_num, show
+from bot.utils import esc, fmt_num, render_template, show
+from bot.views import plain
 
 router = Router(name="admin_shop")
 
@@ -34,6 +35,7 @@ async def main_screen(bot: Bot, db: Database, settings: Settings, config: Config
     balance = await star_balance(bot)
     today, total = await db.shop_stats(day_start(config)), await db.shop_stats()
     losing = [i for i in items if i.active and i.profit < 0]
+    comments = await db.shop_comments()
 
     lines = [
         "🛍 <b>Магазин подарков</b>\n",
@@ -41,6 +43,11 @@ async def main_screen(bot: Bot, db: Database, settings: Settings, config: Config
         "и бот сразу дарит его со своего баланса. Не получилось отправить — звёзды возвращаются автоматически.\n",
         f"Статус: {'🟢 <b>открыт</b>' if enabled else '🔴 <b>закрыт</b>'}",
         f"⭐ Баланс бота: <b>{fmt_num(balance) if balance is not None else '—'}</b>",
+        "",
+        "💬 <b>По цене магазина</b> — подарок с нашим комментарием:",
+        f"<blockquote>{shop.default_comment()}</blockquote>",
+        f"✍️ <b>По себестоимости</b> — со своим комментарием из готовых вариантов: <b>{len(comments)}</b> шт."
+        + ("" if comments else " <i>(вариантов нет — кнопки не будет)</i>"),
         "",
         stats_line("📊 Сегодня", today),
         stats_line("📊 Всего", total) + (f" · возвратов {total['refunded']}" if total["refunded"] else ""),
@@ -55,6 +62,7 @@ async def main_screen(bot: Bot, db: Database, settings: Settings, config: Config
 
     rows = [[btn(f"{'🟢' if i.active else '⚪️'} {i.emoji} {i.name} — {i.price} ⭐ · {signed(i.profit)}",
                  "shop", "item", v=i.id)] for i in items]
+    rows.append([btn("💬 Наш комментарий", "shop", "comment"), btn(f"✍️ Свои варианты · {len(comments)}", "shop", "cm")])
     rows.append([btn("🔴 Закрыть магазин" if enabled else "🟢 Открыть магазин", "shop", "t",
                      style="danger" if enabled else "success")])
     rows.append(topup_button(balance, settings, "shop"))
@@ -67,10 +75,11 @@ async def item_screen(db: Database, item: ShopItem):
     gid = item.id
     profit = ("📈 С одной продажи: <b>" + signed(item.profit) + "</b> ⭐" if item.profit >= 0
               else f"📉 С одной продажи: <b>{signed(item.profit)}</b> ⭐ — <b>продаётся в минус</b>")
+    profit += f"\n✍️ Со своим комментарием: {fmt_num(item.cost)} ⭐ (по себестоимости, прибыль 0)"
     limited = f"\n⏳ Лимитированный: осталось {fmt_num(item.gift.remaining_count)}" if item.gift.remaining_count else ""
     text = (
         f"{item.emoji} <b>{esc(item.name)}</b>\n\n"
-        f"💰 Цена для покупателя: <b>{fmt_num(item.price)}</b> ⭐\n"
+        f"💰 Цена с нашим комментарием: <b>{fmt_num(item.price)}</b> ⭐\n"
         f"🏷 Стоит боту: {fmt_num(item.cost)} ⭐ (списывается с баланса при отправке)\n"
         f"{profit}\n"
         f"🛒 Продано: <b>{fmt_num(sold['sold'])}</b> на {fmt_num(sold['revenue'])} ⭐{limited}\n\n"
@@ -166,3 +175,80 @@ async def on_name(message: Message, state: FSMContext, bot: Bot, db: Database, s
     await state.clear()
     await db.set_shop_item(data["gift_id"], name=None if raw == "-" else raw)
     await open_item(message, bot, db, settings, config, shop, data["gift_id"])
+
+
+# ---------- комментарии ----------
+
+@router.callback_query(A.filter((F.s == "shop") & (F.a == "comment")))
+async def cb_comment(call: CallbackQuery, state: FSMContext, settings: Settings, shop: ShopService) -> None:
+    await prompt(call, state, Input.shop_comment,
+                 "💬 <b>Наш комментарий</b>\n\n"
+                 "С этой подписью уходят подарки по цене магазина. Сейчас:\n"
+                 f"<blockquote>{shop.default_comment()}</blockquote>\n"
+                 f"Пришлите новый текст — до {COMMENT_MAX} символов. "
+                 "<code>{bot}</code> — юзернейм бота, например чтобы получатель нашёл магазин.\n"
+                 "«-» — вернуть текст по умолчанию.",
+                 back("shop", text="✖️ Отмена"))
+
+
+@router.message(Input.shop_comment, F.text)
+async def on_comment(message: Message, state: FSMContext, bot: Bot, db: Database, settings: Settings,
+                     config: Config, shop: ShopService) -> None:
+    raw = message.text.strip()
+    if raw != "-":
+        value = esc(raw)
+        length = len(render_template(raw, bot=f"@{shop.bot_username}"))
+        if length > COMMENT_MAX:
+            await message.answer(f"⚠️ Слишком длинно: {length}/{COMMENT_MAX} символов")
+            return
+    await drop_prompt(message, state)
+    await state.clear()
+    if raw == "-":
+        await settings.reset("shop_comment")
+    else:
+        await settings.set("shop_comment", value)
+    await message.answer("✅ Комментарий сохранён")
+    await show(message, *await main_screen(bot, db, settings, config, shop))
+
+
+async def comments_screen(db: Database):
+    comments = await db.shop_comments()
+    lines = ["✍️ <b>Свои комментарии</b>\n",
+             "Покупатель может выбрать один из этих текстов вместо нашего — тогда подарок стоит "
+             "<b>по себестоимости</b> (столько, сколько он стоит боту).\n"]
+    lines += [f"<b>{n}.</b> {c['text']}" for n, c in enumerate(comments, 1)]
+    if not comments:
+        lines.append("<i>Вариантов пока нет — покупатели видят только подарок с нашим комментарием.</i>")
+    rows = [[btn(f"🗑 {n}. {plain(c['text'], 40)}", "shop", "cmdel", id=c["id"])] for n, c in enumerate(comments, 1)]
+    if len(comments) < MAX_COMMENTS:
+        rows.append([btn("➕ Добавить вариант", "shop", "cmadd", style="success")])
+    rows.append(back("shop", text="« К магазину"))
+    return "\n".join(lines), kb(*rows)
+
+
+@router.callback_query(A.filter((F.s == "shop") & F.a.in_({"cm", "cmdel"})))
+async def cb_comments(call: CallbackQuery, callback_data: A, callback_answer: CallbackAnswer, db: Database) -> None:
+    if callback_data.a == "cmdel":
+        await db.delete_shop_comment(callback_data.id)
+        callback_answer.text = "🗑 Вариант удалён"
+    await show(call, *await comments_screen(db))
+
+
+@router.callback_query(A.filter((F.s == "shop") & (F.a == "cmadd")))
+async def cb_comment_add(call: CallbackQuery, state: FSMContext) -> None:
+    await prompt(call, state, Input.shop_comment_add,
+                 "➕ <b>Новый вариант комментария</b>\n\n"
+                 f"Пришлите текст — до {COMMENT_MAX} символов. Например: «С днём рождения! 🎉»",
+                 back("shop", "cm", "✖️ Отмена"))
+
+
+@router.message(Input.shop_comment_add, F.text)
+async def on_comment_add(message: Message, state: FSMContext, db: Database) -> None:
+    raw = message.text.strip()
+    if len(raw) > COMMENT_MAX:
+        await message.answer(f"⚠️ Слишком длинно: {len(raw)}/{COMMENT_MAX} символов")
+        return
+    await drop_prompt(message, state)
+    await state.clear()
+    await db.add_shop_comment(esc(raw))
+    await show(message, *await comments_screen(db))
