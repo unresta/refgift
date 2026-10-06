@@ -3,8 +3,9 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, LinkPreviewOptions, Message
 
 
 def now() -> int:
@@ -78,3 +79,37 @@ async def show(event: Message | CallbackQuery, text: str, kb: InlineKeyboardMark
         except TelegramBadRequest:
             pass
     return sent
+
+
+async def send_card(bot: Bot, chat_id: int, text: str, kb: InlineKeyboardMarkup | None = None,
+                    photo: str | None = None, preview_url: str | None = None) -> Message:
+    """Карточка: фото с подписью, иначе текст с большим превью ссылки (или без превью)."""
+    if photo:
+        try:
+            return await bot.send_photo(chat_id, photo, caption=text, reply_markup=kb)
+        except TelegramBadRequest:  # слишком длинная подпись или битый file_id — покажем текстом
+            pass
+    preview = (LinkPreviewOptions(url=preview_url, prefer_large_media=True, show_above_text=True)
+               if preview_url else None)
+    return await bot.send_message(chat_id, text, reply_markup=kb, link_preview_options=preview)
+
+
+async def show_card(call: CallbackQuery, text: str, kb: InlineKeyboardMarkup | None = None,
+                    photo: str | None = None, preview_url: str | None = None) -> None:
+    """Как show(), но для карточек с картинкой/превью: текстовый экран редактирует, иначе присылает заново."""
+    msg = call.message
+    if not photo and isinstance(msg, Message) and msg.text is not None:
+        preview = (LinkPreviewOptions(url=preview_url, prefer_large_media=True, show_above_text=True)
+                   if preview_url else None)
+        try:
+            await msg.edit_text(text, reply_markup=kb, link_preview_options=preview)
+            return
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e):
+                return
+    await send_card(call.bot, call.from_user.id, text, kb, photo, preview_url)
+    if isinstance(msg, Message):
+        try:
+            await msg.delete()
+        except TelegramBadRequest:
+            pass

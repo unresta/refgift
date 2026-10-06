@@ -16,6 +16,8 @@ class Config:
     webapp_url: str = ""       # публичный HTTPS-адрес мини-аппа (без / в конце)
     web_host: str = "0.0.0.0"
     web_port: int = 8080
+    userbot_api_id: int = 0    # юзербот для НФТ подарков: api_id/api_hash с my.telegram.org
+    userbot_api_hash: str = ""
 
 
 def load_config() -> Config:
@@ -36,4 +38,6 @@ def load_config() -> Config:
         webapp_url=os.getenv("WEBAPP_URL", "").strip().rstrip("/"),
         web_host=os.getenv("WEB_HOST", "0.0.0.0"),
         web_port=int(os.getenv("WEB_PORT", "8080")),
+        userbot_api_id=int(os.getenv("USERBOT_API_ID", "").strip() or 0),
+        userbot_api_hash=os.getenv("USERBOT_API_HASH", "").strip(),
     )

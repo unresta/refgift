@@ -2,3 +2,4 @@ aiogram>=3.31,<4
 aiosqlite>=0.20
 python-dotenv>=1.0
 pillow>=11
+telethon>=1.40

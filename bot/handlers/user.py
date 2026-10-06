@@ -17,10 +17,11 @@ from bot.services.reminders import ReminderService
 from bot.services.rewards import ClaimResult, RewardService
 from bot.services.roulette import SPIN_PREFIX, RouletteService
 from bot.services.subscription import SubscriptionService
+from bot.services.userbot import Userbot
 from bot.settings import Settings
-from bot.utils import esc, render_template, show
+from bot.utils import esc, render_template, show, show_card
 from bot.views import (FRIENDS_PAGE, activation_screen, back_to_menu, friends_screen, invite_screen, kb, menu_screen,
-                       subscribe_screen, top_screen)
+                       nft_card_screen, nft_contact_base, nft_list_screen, subscribe_screen, top_screen)
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +40,8 @@ async def open_menu(event: Message | CallbackQuery, user_id: int, db: Database, 
     user = await db.get_user(user_id)
     assert user is not None
     pending = await db.user_pending_claim(user_id)
-    await show(event, *menu_screen(user, settings, pending is not None, is_admin))
+    has_nft = await db.count_nft_gifts(only_active=True) > 0
+    await show(event, *menu_screen(user, settings, pending is not None, is_admin, has_nft))
 
 
 async def pass_gate(event: Message | CallbackQuery, user_id: int, db: Database, settings: Settings,
@@ -165,6 +167,24 @@ async def cb_claim(call: CallbackQuery, callback_answer: CallbackAnswer, user: R
     text = render_template(settings.get(key), name=esc(user["full_name"]))
     callback_answer.text = "🎉 Готово!"
     await show(call, text, kb(back_to_menu()))
+
+
+@router.callback_query(U.filter(F.a == "nft"))
+async def cb_nft(call: CallbackQuery, callback_data: U, db: Database, settings: Settings) -> None:
+    await show(call, *nft_list_screen(await db.nft_gifts(only_active=True), settings, callback_data.p))
+
+
+@router.callback_query(U.filter(F.a == "nftg"))
+async def cb_nft_gift(call: CallbackQuery, callback_data: U, callback_answer: CallbackAnswer, db: Database,
+                      settings: Settings, userbot: Userbot) -> None:
+    gift = await db.get_nft_gift(callback_data.p)
+    if gift is None or not gift["is_active"]:
+        callback_answer.text = "Этот подарок больше недоступен"
+        await show(call, *nft_list_screen(await db.nft_gifts(only_active=True), settings, 0))
+        return
+    await db.nft_gift_viewed(gift["id"])
+    text, markup = nft_card_screen(gift, settings, nft_contact_base(settings, userbot.username))
+    await show_card(call, text, markup, photo=gift["photo"], preview_url=gift["link"])
 
 
 @router.callback_query(U.filter(F.a == "noop"))

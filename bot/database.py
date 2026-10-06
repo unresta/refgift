@@ -170,6 +170,26 @@ CREATE TABLE IF NOT EXISTS spins (
 CREATE INDEX IF NOT EXISTS idx_spins_user ON spins(user_id, id);
 CREATE INDEX IF NOT EXISTS idx_spins_paid ON spins(paid_at);
 
+CREATE TABLE IF NOT EXISTS nft_gifts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    title       TEXT    NOT NULL,
+    price       TEXT,                      -- свободный текст: «1 500 ⭐», «25 TON»
+    description TEXT,
+    link        TEXT,                      -- https://t.me/nft/... — превью подарка в карточке
+    photo       TEXT,                      -- file_id картинки (важнее превью ссылки)
+    is_active   INTEGER NOT NULL DEFAULT 1,
+    position    INTEGER NOT NULL DEFAULT 0,
+    views       INTEGER NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS userbot_messages (
+    user_id    INTEGER NOT NULL,
+    stars      INTEGER NOT NULL DEFAULT 0, -- сколько звёзд заплатили за сообщение
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_userbot_messages_created ON userbot_messages(created_at);
+
 CREATE TABLE IF NOT EXISTS check_activations (
     check_id   INTEGER NOT NULL,
     user_id    INTEGER NOT NULL,
@@ -933,6 +953,60 @@ class Database:
             "FROM spins WHERE paid_at IS NOT NULL AND paid_at >= ? GROUP BY case_id ORDER BY revenue DESC",
             since,
         )
+
+    # ---------- НФТ подарки ----------
+    async def nft_gifts(self, only_active: bool = False) -> list[aiosqlite.Row]:
+        where = "WHERE is_active = 1" if only_active else ""
+        return await self.all(f"SELECT * FROM nft_gifts {where} ORDER BY position, id")
+
+    async def count_nft_gifts(self, only_active: bool = False) -> int:
+        where = "WHERE is_active = 1" if only_active else ""
+        return await self.val(f"SELECT COUNT(*) FROM nft_gifts {where}")
+
+    async def get_nft_gift(self, gift_id: int) -> aiosqlite.Row | None:
+        return await self.one("SELECT * FROM nft_gifts WHERE id = ?", gift_id)
+
+    async def create_nft_gift(self, title: str, link: str | None = None) -> int:
+        position = await self.val("SELECT COALESCE(MAX(position), 0) + 1 FROM nft_gifts")
+        cur = await self.conn.execute(
+            "INSERT INTO nft_gifts (title, link, position, created_at) VALUES (?, ?, ?, ?)",
+            (title, link, position, now()),
+        )
+        await self.conn.commit()
+        return cur.lastrowid or 0
+
+    async def update_nft_gift(self, gift_id: int, **fields: Any) -> None:
+        assert set(fields) <= {"title", "price", "description", "link", "photo", "is_active"}, fields
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        await self.run(f"UPDATE nft_gifts SET {sets} WHERE id = ?", *fields.values(), gift_id)
+
+    async def move_nft_gift_up(self, gift_id: int) -> None:
+        gifts = [g["id"] for g in await self.nft_gifts()]
+        if gift_id not in gifts or gifts.index(gift_id) == 0:
+            return
+        i = gifts.index(gift_id)
+        gifts[i - 1], gifts[i] = gifts[i], gifts[i - 1]
+        await self.conn.executemany("UPDATE nft_gifts SET position = ? WHERE id = ?",
+                                    [(pos, gid) for pos, gid in enumerate(gifts, 1)])
+        await self.conn.commit()
+
+    async def delete_nft_gift(self, gift_id: int) -> None:
+        await self.run("DELETE FROM nft_gifts WHERE id = ?", gift_id)
+
+    async def nft_gift_viewed(self, gift_id: int) -> None:
+        await self.run("UPDATE nft_gifts SET views = views + 1 WHERE id = ?", gift_id)
+
+    async def log_userbot_message(self, user_id: int, stars: int) -> None:
+        await self.run("INSERT INTO userbot_messages (user_id, stars, created_at) VALUES (?, ?, ?)",
+                       user_id, stars, now())
+
+    async def userbot_stats(self, since: int = 0) -> aiosqlite.Row:
+        row = await self.one(
+            "SELECT COUNT(*) AS messages, COUNT(DISTINCT user_id) AS users, COALESCE(SUM(stars), 0) AS stars "
+            "FROM userbot_messages WHERE created_at >= ?", since,
+        )
+        assert row is not None
+        return row
 
     # ---------- settings ----------
     async def load_settings(self) -> dict[str, str]:

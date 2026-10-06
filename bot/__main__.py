@@ -26,6 +26,7 @@ from bot.web.media import GiftMedia
 from bot.web.server import WebContext, create_app
 from bot.services.rewards import RewardService
 from bot.services.subscription import SubscriptionService
+from bot.services.userbot import Userbot
 from bot.settings import Settings
 
 log = logging.getLogger("bot")
@@ -55,7 +56,7 @@ async def build(config: Config, bot: Bot) -> tuple[Dispatcher, Database, AdminRe
         storage=MemoryStorage(),
         config=config, db=db, settings=settings, admins=admins, subs=subs,
         rewards=rewards, broadcaster=broadcaster, checks=checks, gift_images=gift_images, reminders=reminders,
-        roulette=roulette, catalog=catalog,
+        roulette=roulette, catalog=catalog, userbot=Userbot(config, db, settings),
         web=WebContext(bot, db, settings, subs, rewards, roulette, catalog, media, admins),
         bot_username=me.username,
     )
@@ -86,6 +87,7 @@ async def main() -> None:
     await dp["roulette"].seed_defaults()
     await dp["roulette"].upgrade_default_weights()
     await dp["roulette"].recover()  # выигрыши, оплаченные до перезапуска
+    dp["userbot"].launch()
 
     runner = web.AppRunner(create_app(dp["web"]), access_log=None)
     await runner.setup()
@@ -105,6 +107,7 @@ async def main() -> None:
     finally:
         await runner.cleanup()
         await dp["reminders"].stop()
+        await dp["userbot"].stop()
         await db.close()
         await bot.session.close()
 

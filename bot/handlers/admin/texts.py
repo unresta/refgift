@@ -37,7 +37,10 @@ def list_screen(settings: Settings):
 def card_screen(settings: Settings, key: str):
     meta = TEXTS[key]
     placeholders = ", ".join(f"<code>{{{p}}}</code>" for p in meta.placeholders)
-    preview = render_template(settings.get(key), **sample_values(settings))
+    values = sample_values(settings)
+    if key.startswith("text_nft"):
+        values["gift"] = "«Plush Pepe #1234»"
+    preview = render_template(settings.get(key), **values)
     text = (f"📝 <b>{meta.title}</b>\n<i>{meta.hint}</i>\n\n"
             f"Переменные: {placeholders}\n"
             f"━━━━━━━━━━ предпросмотр ━━━━━━━━━━\n\n{preview}")

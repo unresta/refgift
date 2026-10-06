@@ -437,6 +437,110 @@ async def scenario(dp, db, bot, session) -> None:
     check("Отправлено: <b>0</b>" in session.screen().text and "BALANCE_TOO_LOW" in session.screen().text,
           "ошибка отправки показана админу")
 
+    print("НФТ подарки")
+    session.members.add((-1002, 100))  # канал добавлен выше — пользователь подписывается и на него
+    await feed(cb_update(100, U(a="menu").pack()))
+    check("НФТ подарки" not in str(session.screen().reply_markup), "без подарков кнопки в меню нет")
+    await feed(cb_update(ADMIN, A(s="home").pack()))
+    check("НФТ подарки" in str(session.screen().reply_markup), "раздел на дашборде")
+    await feed(cb_update(ADMIN, A(s="nft").pack()))
+    check("не подключён" in session.screen().text and "не задана" in session.screen().text,
+          "юзербот не настроен, ссылки для связи нет — предупреждение")
+    await feed(cb_update(ADMIN, A(s="nft", a="add").pack()))
+    await feed(msg_update(ADMIN, "https://t.me/nft/PlushPepe-1234"))
+    nft = (await db.nft_gifts())[-1]
+    check(nft["title"] == "Plush Pepe #1234" and nft["link"] == "https://t.me/nft/PlushPepe-1234",
+          "подарок по ссылке: название из ссылки")
+    await feed(cb_update(ADMIN, A(s="nft", a="edit", id=nft["id"], v="price").pack()))
+    await feed(msg_update(ADMIN, "1 500 ⭐"))
+    await feed(cb_update(ADMIN, A(s="nft", a="edit", id=nft["id"], v="link").pack()))
+    await feed(msg_update(ADMIN, "не ссылка"))
+    check("не похоже на ссылку" in session.texts_to(ADMIN)[-1], "неверная ссылка отклонена")
+    await feed(cb_update(ADMIN, A(s="nft", a="contact").pack()))
+    await feed(msg_update(ADMIN, "@nft_admin"))
+    check(settings.get("nft_contact_url") == "https://t.me/nft_admin", "ссылка для связи из @username")
+    await feed(cb_update(ADMIN, A(s="nft", a="add").pack()))
+    await feed(msg_update(ADMIN, "Durov's Cap"))
+    cap = (await db.nft_gifts())[-1]
+
+    await feed(cb_update(100, U(a="menu").pack()))
+    check("НФТ подарки" in str(session.screen().reply_markup), "в меню появилась кнопка «НФТ подарки»")
+    await feed(cb_update(100, U(a="nft").pack()))
+    markup = str(session.screen().reply_markup)
+    check("Plush Pepe #1234 · 1 500 ⭐" in markup and "Durov's Cap" in markup, "список подарков с ценами")
+    await feed(cb_update(100, U(a="nftg", p=nft["id"]).pack()))
+    card = session.screen()
+    urls = [b.url for row in card.reply_markup.inline_keyboard for b in row if b.url]
+    check("Напиши админу" in card.text and "«Plush Pepe #1234»" in card.text, "карточка с инструкцией")
+    check(urls[0].startswith("https://t.me/nft_admin?text=") and "Plush%20Pepe" in urls[0],
+          "«Написать админу» — с готовым текстом про подарок")
+    check(card.link_preview_options.url == nft["link"], "превью НФТ подарка по ссылке")
+    check((await db.get_nft_gift(nft["id"]))["views"] == 1, "просмотр засчитан")
+
+    await feed(cb_update(ADMIN, A(s="nft", a="edit", id=cap["id"], v="photo").pack()))
+    await feed(msg_update(ADMIN, "", photo=[{"file_id": "cap_photo", "file_unique_id": "c", "width": 512,
+                                             "height": 512}]))
+    await feed(cb_update(100, U(a="nftg", p=cap["id"]).pack()))
+    photo = session.by_type(SendPhoto)[-1]
+    check(photo.chat_id == 100 and photo.photo == "cap_photo" and "Durov" in photo.caption,
+          "карточка с картинкой — фото с подписью")
+    await feed(cb_update(ADMIN, A(s="nft", a="preview", id=cap["id"]).pack()))
+    check(session.by_type(SendPhoto)[-1].chat_id == ADMIN, "админ видит карточку как пользователь")
+    await feed(cb_update(ADMIN, A(s="nft", a="toggle", id=cap["id"]).pack()))
+    await feed(cb_update(100, U(a="nftg", p=cap["id"]).pack()))
+    check("Durov" not in str(session.screen().reply_markup), "скрытый подарок недоступен пользователю")
+    await feed(cb_update(ADMIN, A(s="nft", a="del_ok", id=cap["id"]).pack()))
+    check(await db.get_nft_gift(cap["id"]) is None, "подарок удалён")
+
+    print("Юзербот")
+    from types import SimpleNamespace
+    from telethon.tl import types as tl
+    userbot, replies = dp["userbot"], []
+
+    def ub_event(uid, stars=0, **flags):
+        sender = tl.User(id=uid, first_name="Покупатель", **flags)
+
+        async def get_sender():
+            return sender
+
+        async def respond(text, **kw):
+            replies.append((uid, text, kw))
+        return SimpleNamespace(get_sender=get_sender, respond=respond,
+                               message=SimpleNamespace(paid_message_stars=stars))
+
+    await feed(cb_update(ADMIN, A(s="ub").pack()))
+    check("не настроен" in session.screen().text and "my.telegram.org" in session.screen().text,
+          "без api_id — инструкция по подключению")
+    await feed(cb_update(ADMIN, A(s="ub", a="reply").pack()))
+    await feed(msg_update(ADMIN, "{name}, админ скоро отправит вам подарок!"))
+    check("Иван, админ скоро" in session.screen().text, "автоответ сохранён, предпросмотр с именем")
+
+    await userbot.on_message(ub_event(800, stars=100))
+    check(replies[-1][:2] == (800, "Покупатель, админ скоро отправит вам подарок!")
+          and replies[-1][2]["parse_mode"] == "html", "на платное сообщение — автоответ")
+    await userbot.on_message(ub_event(800, stars=100))
+    check(len(replies) == 1, "альбом/спам в ту же секунду — один ответ")
+    userbot._last.clear()
+    await userbot.on_message(ub_event(800, stars=100))
+    check(len(replies) == 2, "повторное сообщение — снова тот же ответ")
+    await userbot.on_message(ub_event(801, contact=True))
+    await userbot.on_message(ub_event(802, bot=True))
+    check(len(replies) == 2, "контактам и ботам не отвечает")
+    await feed(cb_update(ADMIN, A(s="ub", a="t", v="userbot_paid_only").pack()))
+    await userbot.on_message(ub_event(803))
+    await userbot.on_message(ub_event(804, stars=50))
+    check([r[0] for r in replies[2:]] == [804], "режим «только платные»")
+    stats = await db.userbot_stats()
+    check(stats["messages"] == 4 and stats["stars"] == 350 and stats["users"] == 2, "статистика сообщений и звёзд")
+    await feed(cb_update(ADMIN, A(s="ub", a="t", v="userbot_enabled").pack()))
+    await userbot.on_message(ub_event(805, stars=50))
+    check(len(replies) == 3, "автоответ выключен — молчит")
+    await feed(cb_update(ADMIN, A(s="ub", a="reset").pack()))
+    await feed(cb_update(ADMIN, A(s="ub", a="t", v="userbot_enabled").pack()))
+    await feed(cb_update(ADMIN, A(s="ub", a="reconnect").pack()))
+    check(settings.get("userbot_reply") == "🎁 Админ скоро отправит вам подарок!"
+          and "Всего: <b>4</b>" in session.screen().text, "сброс текста и переподключение без настроек")
+
     print("Рекламные ссылки")
     await feed(cb_update(ADMIN, A(s="lk").pack()))
     await feed(cb_update(ADMIN, A(s="lk", a="new").pack()))

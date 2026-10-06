@@ -1,4 +1,5 @@
 """Экраны пользовательской части: текст + клавиатура."""
+import re
 from urllib.parse import quote
 
 from aiogram.types import InlineKeyboardButton as Btn, InlineKeyboardMarkup, WebAppInfo
@@ -46,7 +47,8 @@ def subscribe_screen(settings: Settings, name: str, missing: list[Row], for_chec
     return text, kb(*rows)
 
 
-def menu_screen(user: Row, settings: Settings, has_pending_claim: bool, is_admin: bool) -> Screen:
+def menu_screen(user: Row, settings: Settings, has_pending_claim: bool, is_admin: bool,
+                has_nft: bool = False) -> Screen:
     p = calc_progress(user, settings)
     friends = plural(p.left, "друга", "друзей", "друзей")
 
@@ -77,6 +79,8 @@ def menu_screen(user: Row, settings: Settings, has_pending_claim: bool, is_admin
                  Btn(text="🏆 Топ", callback_data=U(a="top").pack())])
     if settings.webapp_url and settings.flag("roulette_enabled"):
         rows.append([Btn(text="🎰 Рулетка подарков", web_app=WebAppInfo(url=settings.webapp_url))])
+    if has_nft:
+        rows.append([Btn(text="💎 НФТ подарки", callback_data=U(a="nft").pack())])
     rows.append([Btn(text="❓ Как это работает", callback_data=U(a="rules").pack())])
     if is_admin:
         rows.append([Btn(text="🛠 Админ-панель", callback_data=A(s="home").pack())])
@@ -182,3 +186,63 @@ def activation_screen(act: Activation, settings: Settings) -> Screen:
         [Btn(text="🔗 Пригласить друзей", style="primary", callback_data=U(a="invite").pack())],
         back_to_menu(),
     )
+
+
+# ---------- НФТ подарки ----------
+
+NFT_PAGE = 8
+USERNAME_URL_RE = re.compile(r"https://t\.me/([A-Za-z]\w{3,})/?")
+
+
+def nft_contact_base(settings: Settings, userbot_username: str | None) -> str:
+    """Ссылка кнопки «Написать админу»: из настроек, иначе — на юзербота."""
+    return settings.get("nft_contact_url") or (f"https://t.me/{userbot_username}" if userbot_username else "")
+
+
+def nft_contact_url(base: str, title: str) -> str:
+    """Для t.me/username — сразу с готовым текстом про выбранный подарок."""
+    m = USERNAME_URL_RE.fullmatch(base)
+    if m:
+        return f"https://t.me/{m.group(1)}?text={quote(f'Привет! Хочу НФТ подарок «{title}» 🎁', safe='')}"
+    return base
+
+
+def nft_button_text(gift: Row) -> str:
+    return f"💎 {gift['title']}" + (f" · {gift['price']}" if gift["price"] else "")
+
+
+def nft_list_screen(gifts: list[Row], settings: Settings, page: int) -> Screen:
+    pages = max(1, -(-len(gifts) // NFT_PAGE))
+    page = max(0, min(page, pages - 1))
+    text = settings.get("text_nft_list")
+    if not gifts:
+        text += "\n\n<i>Подарков пока нет — загляни чуть позже.</i>"
+    rows = [[Btn(text=nft_button_text(g), callback_data=U(a="nftg", p=g["id"]).pack())]
+            for g in gifts[page * NFT_PAGE:(page + 1) * NFT_PAGE]]
+    if pages > 1:
+        rows.append([
+            Btn(text="◀️", callback_data=U(a="nft", p=(page - 1) % pages).pack()),
+            Btn(text=f"{page + 1}/{pages}", callback_data=U(a="noop").pack()),
+            Btn(text="▶️", callback_data=U(a="nft", p=(page + 1) % pages).pack()),
+        ])
+    rows.append(back_to_menu())
+    return text, kb(*rows)
+
+
+def nft_card_screen(gift: Row, settings: Settings, contact_base: str) -> Screen:
+    title = esc(gift["title"])
+    lines = [f"💎 <b>{title}</b>"]
+    if gift["price"]:
+        lines.append(f"💰 Цена: <b>{esc(gift['price'])}</b>")
+    if gift["description"]:
+        lines.append(f"\n{gift['description']}")
+    lines.append("\n" + render_template(settings.get("text_nft_howto"), gift=f"«{title}»"))
+
+    rows: list[list[Btn]] = []
+    if contact_base:
+        rows.append([Btn(text="✍️ Написать админу", style="success",
+                         url=nft_contact_url(contact_base, gift["title"]))])
+    if gift["link"]:
+        rows.append([Btn(text="🔍 Посмотреть подарок", url=gift["link"])])
+    rows.append([Btn(text="« К подаркам", callback_data=U(a="nft").pack())])
+    return "\n".join(lines), kb(*rows)

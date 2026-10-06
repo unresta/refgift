@@ -68,6 +68,10 @@ class Input(StatesGroup):
     rl_weight = State()
     cgift_target = State()
     cgift_text = State()
+    nft_add = State()
+    nft_field = State()
+    nft_contact = State()
+    ub_reply = State()
 
 
 def btn(text: str, s: str, a: str = "open", id: int = 0, p: int = 0, v: str = "",
