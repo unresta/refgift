@@ -2,7 +2,7 @@ import logging
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import CommandObject, CommandStart
 from aiogram.types import (CallbackQuery, ChatJoinRequest, ChatMemberUpdated, LabeledPrice, Message,
                            PreCheckoutQuery)
@@ -174,9 +174,21 @@ async def cb_claim(call: CallbackQuery, callback_answer: CallbackAnswer, user: R
     await show(call, text, kb(back_to_menu()))
 
 
+async def show_nft_list(call: CallbackQuery, db: Database, settings: Settings, page: int) -> None:
+    gifts = await db.nft_gifts(only_active=True)
+    try:
+        await show(call, *nft_list_screen(gifts, settings, page))
+    except TelegramBadRequest as e:
+        if not any(g["emoji_id"] for g in gifts):
+            raise
+        # премиум-эмодзи на кнопках доступны, только если у владельца бота есть Telegram Premium
+        log.warning("Кнопки с премиум-эмодзи не приняты (%s) — показываю без них", e)
+        await show(call, *nft_list_screen(gifts, settings, page, icons=False))
+
+
 @router.callback_query(U.filter(F.a == "nft"))
 async def cb_nft(call: CallbackQuery, callback_data: U, db: Database, settings: Settings) -> None:
-    await show(call, *nft_list_screen(await db.nft_gifts(only_active=True), settings, callback_data.p))
+    await show_nft_list(call, db, settings, callback_data.p)
 
 
 @router.callback_query(U.filter(F.a == "nftg"))
@@ -185,7 +197,7 @@ async def cb_nft_gift(call: CallbackQuery, callback_data: U, callback_answer: Ca
     gift = await db.get_nft_gift(callback_data.p)
     if gift is None or not gift["is_active"]:
         callback_answer.text = "Этот подарок больше недоступен"
-        await show(call, *nft_list_screen(await db.nft_gifts(only_active=True), settings, 0))
+        await show_nft_list(call, db, settings, 0)
         return
     await db.nft_gift_viewed(gift["id"])
     text, markup = nft_card_screen(gift, settings, nft_contact_base(settings, userbot.username))

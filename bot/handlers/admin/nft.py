@@ -35,6 +35,10 @@ FIELDS = {
                                    "«-» — убрать описание.", 500),
     "link": ("🔗 Ссылка", "Пришлите ссылку на подарок, например <code>https://t.me/nft/PlushPepe-1234</code> — "
                          "в карточке появится превью подарка и кнопка «🔍 Посмотреть подарок».\n«-» — убрать ссылку.", 256),
+    "emoji": ("✨ Премиум-эмодзи", "Пришлите один премиум-эмодзи — он будет иконкой на кнопке подарка "
+                                  "в списке НФТ подарков.\n«-» — убрать.\n\n"
+                                  "<i>Иконки на кнопках Telegram показывает, только если у владельца бота есть "
+                                  "Telegram Premium.</i>", 0),
     "photo": ("🖼 Картинка", "Пришлите картинку подарка (как фото). Она покажется в карточке вместо превью ссылки.\n"
                             "«-» — убрать картинку.", 0),
 }
@@ -116,6 +120,7 @@ def card_screen(g: Row, link_views: dict[str, int] | None = None, link_error: st
         f"🔗 Ссылка на подарок: {esc(g['link']) if g['link'] else '—'}",
         f"💬 Ссылка на чат: {chat_link}",
         f"🖼 Картинка: {picture}",
+        f"✨ Премиум-эмодзи на кнопке: {'задан' if g['emoji_id'] else '—'}",
         f"👁 Открыли: <b>{fmt_num(g['views'])}</b> раз",
         f"Статус: {'🟢 показывается пользователям' if g['is_active'] else '🔴 скрыт'}",
     ]
@@ -130,7 +135,8 @@ def card_screen(g: Row, link_views: dict[str, int] | None = None, link_error: st
     return "\n".join(lines), kb(
         [edit("title"), edit("price")],
         [edit("description"), edit("link")],
-        [edit("photo"), btn("👁 Как видит пользователь", "nft", "preview", id=gid, style="primary")],
+        [edit("photo"), edit("emoji")],
+        [btn("👁 Как видит пользователь", "nft", "preview", id=gid, style="primary")],
         [btn("🔴 Скрыть" if g["is_active"] else "🟢 Показать", "nft", "toggle", id=gid),
          btn("⬆️ Выше", "nft", "up", id=gid)],
         [btn("🔄 Обновить ссылку на чат", "nft", "sync1", id=gid),
@@ -281,6 +287,12 @@ async def on_edit_text(message: Message, state: FSMContext, db: Database, settin
     elif field == "photo":
         await message.answer("⚠️ Пришлите картинку как фото или «-», чтобы убрать её")
         return
+    elif field == "emoji":
+        value = next((e.custom_emoji_id for e in message.entities or [] if e.type == "custom_emoji"), None)
+        if value is None:
+            await message.answer("⚠️ Это не премиум-эмодзи. Выберите эмодзи из премиум-набора "
+                                 "(с анимацией или из стикерпака эмодзи) и пришлите его.")
+            return
     elif len(raw) > limit:
         await message.answer(f"⚠️ Слишком длинно: {len(raw)}/{limit} символов")
         return
@@ -295,7 +307,7 @@ async def on_edit_text(message: Message, state: FSMContext, db: Database, settin
         value = raw
     await drop_prompt(message, state)
     await state.clear()
-    await db.update_nft_gift(data["gift_id"], **{field: value})
+    await db.update_nft_gift(data["gift_id"], **{"emoji_id" if field == "emoji" else field: value})
     if field == "title":  # название есть в сообщении ссылки на чат — обновим её
         await userbot.sync_nft_link(data["gift_id"])
     await message.answer("✅ Сохранено")

@@ -43,6 +43,7 @@ class FakeSession(BaseSession):
         self.members: set[tuple[int, int]] = set()
         self.gift_error: str | None = None
         self.balance = 100
+        self.reject_icons = False  # как у бота, владелец которого без Telegram Premium
 
     async def close(self) -> None:
         pass
@@ -67,6 +68,9 @@ class FakeSession(BaseSession):
     async def make_request(self, bot, method, timeout=None):
         self.calls.append(method)
         name = type(method).__name__
+        markup = getattr(method, "reply_markup", None)
+        if self.reject_icons and markup is not None and "icon_custom_emoji_id='" in str(markup):
+            raise TelegramBadRequest(method=method, message="Bad Request: BUTTON_ICON_INVALID")
         if isinstance(method, GetMe):
             return User(id=BOT_ID, is_bot=True, first_name="Bot", username="test_bot")
         if isinstance(method, GetChatMember):
@@ -469,6 +473,25 @@ async def scenario(dp, db, bot, session) -> None:
     await feed(cb_update(100, U(a="nft").pack()))
     markup = str(session.screen().reply_markup)
     check("Plush Pepe #1234 · 1 500 ⭐" in markup and "Durov's Cap" in markup, "список подарков с ценами")
+    check("💎" not in markup, "на кнопках подарков нет 💎")
+
+    await feed(cb_update(ADMIN, A(s="nft", a="edit", id=nft["id"], v="emoji").pack()))
+    await feed(msg_update(ADMIN, "🔥"))
+    check("не премиум-эмодзи" in session.texts_to(ADMIN)[-1], "обычный эмодзи не подходит")
+    await feed(msg_update(ADMIN, "🐸", entities=[{"type": "custom_emoji", "offset": 0, "length": 2,
+                                                   "custom_emoji_id": "5368324170671202286"}]))
+    check((await db.get_nft_gift(nft["id"]))["emoji_id"] == "5368324170671202286"
+          and "Премиум-эмодзи на кнопке: задан" in session.screen().text, "премиум-эмодзи сохранён")
+    await feed(cb_update(100, U(a="nft").pack()))
+    first = session.screen().reply_markup.inline_keyboard[0][0]
+    check(first.icon_custom_emoji_id == "5368324170671202286" and first.text == "Plush Pepe #1234 · 1 500 ⭐",
+          "кнопка подарка с премиум-эмодзи")
+    session.reject_icons = True
+    await feed(cb_update(100, U(a="nft").pack()))
+    session.reject_icons = False
+    first = session.screen().reply_markup.inline_keyboard[0][0]
+    check(first.icon_custom_emoji_id is None and "Plush Pepe" in first.text,
+          "Telegram не принял иконки — список без них, а не ошибка")
     await feed(cb_update(100, U(a="nftg", p=nft["id"]).pack()))
     card = session.screen()
     urls = [b.url for row in card.reply_markup.inline_keyboard for b in row if b.url]

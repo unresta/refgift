@@ -216,16 +216,18 @@ def nft_contact_url(gift: Row, settings: Settings, base: str) -> str:
 
 
 def nft_button_text(gift: Row) -> str:
-    return f"💎 {gift['title']}" + (f" · {gift['price']}" if gift["price"] else "")
+    return gift["title"] + (f" · {gift['price']}" if gift["price"] else "")
 
 
-def nft_list_screen(gifts: list[Row], settings: Settings, page: int) -> Screen:
+def nft_list_screen(gifts: list[Row], settings: Settings, page: int, icons: bool = True) -> Screen:
+    """icons=False — без премиум-эмодзи (если Telegram их не принял)."""
     pages = max(1, -(-len(gifts) // NFT_PAGE))
     page = max(0, min(page, pages - 1))
     text = settings.get("text_nft_list")
     if not gifts:
         text += "\n\n<i>Подарков пока нет — загляни чуть позже.</i>"
-    rows = [[Btn(text=nft_button_text(g), callback_data=U(a="nftg", p=g["id"]).pack())]
+    rows = [[Btn(text=nft_button_text(g), icon_custom_emoji_id=g["emoji_id"] if icons else None,
+                 callback_data=U(a="nftg", p=g["id"]).pack())]
             for g in gifts[page * NFT_PAGE:(page + 1) * NFT_PAGE]]
     if pages > 1:
         rows.append([

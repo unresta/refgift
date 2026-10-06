@@ -241,6 +241,7 @@ MIGRATIONS = [
     ("nft_gifts", "chat_link", "TEXT"),       # ссылка на чат с юзерботом (Telegram Business) с готовым сообщением
     ("nft_gifts", "chat_link_slug", "TEXT"),
     ("shop_orders", "comment", "TEXT"),
+    ("nft_gifts", "emoji_id", "TEXT"),      # премиум-эмодзи — иконка на кнопке подарка
 ]
 POST_MIGRATION_SQL = """
 CREATE INDEX IF NOT EXISTS idx_users_ad_link ON users(ad_link_id, created_at);
@@ -1008,7 +1009,7 @@ class Database:
 
     async def update_nft_gift(self, gift_id: int, **fields: Any) -> None:
         assert set(fields) <= {"title", "price", "description", "link", "photo", "is_active", "chat_link",
-                               "chat_link_slug"}, fields
+                               "chat_link_slug", "emoji_id"}, fields
         sets = ", ".join(f"{k} = ?" for k in fields)
         await self.run(f"UPDATE nft_gifts SET {sets} WHERE id = ?", *fields.values(), gift_id)
 
