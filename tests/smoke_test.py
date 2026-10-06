@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.base import BaseSession
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.methods import (AnswerInlineQuery, CopyMessage, CreateChatInviteLink, EditMessageCaption,
                              GetAvailableGifts, GetChat, GetChatMember, GetChatMemberCount, GetFile, GetMe,
                              GetMyStarBalance, RefundStarPayment, SendDocument, SendGift, SendInvoice, SendPhoto,
@@ -109,6 +109,9 @@ class FakeSession(BaseSession):
             name = method.chat_id[1:]
             if "missing" in name:
                 raise TelegramBadRequest(method=method, message="Bad Request: chat not found")
+            if "flood" in name:
+                raise TelegramRetryAfter(method=method, message="Too Many Requests: retry after 300",
+                                         retry_after=300)
             return ChatFullInfo(id=-2000000 - sum(map(ord, name)), type="supergroup" if "group" in name else "channel",
                                 title=name.capitalize(), accent_color_id=0, max_reaction_count=0,
                                 accepted_gift_types={"unlimited_gifts": True, "limited_gifts": True,
@@ -505,6 +508,25 @@ async def scenario(dp, db, bot, session) -> None:
           "повторное нажатие не запускает вторую отправку, «Стоп» останавливает")
     await feed(cb_update(ADMIN, A(s="cgb", a="new").pack()))
     check(not batch.channels, "новая пачка — список очищен")
+
+    await feed(cb_update(ADMIN, A(s="cgb").pack()))
+    calls = len(session.by_type(GetChat))
+    await feed(msg_update(ADMIN, "@batch1 https://t.me/batchflood @batch2 @BatchX @batchx"))
+    report = session.texts_to(ADMIN)[-2]
+    check(len(session.by_type(GetChat)) - calls == 2,
+          "упёрлись в лимит Telegram — дальше каналы не проверяем")
+    check(list(batch.channels.values()) == ["Batch1", "@batchflood", "@batch2", "@BatchX"]
+          and "Добавлено каналов: <b>4</b>" in report and "2 — без проверки" not in report
+          and "3 — без проверки" in report and "не найден" not in report,
+          "лимит — не «не найден»: каналы добавлены по юзернейму, регистр не дублирует")
+    before = len(session.by_type(SendGift))
+    await feed(cb_update(ADMIN, A(s="cgb", a="gift", v="g_bear").pack()))
+    await feed(cb_update(ADMIN, A(s="cgb", a="none").pack()))
+    await feed(cb_update(ADMIN, A(s="cgb", a="send").pack()))
+    await cgb_mod.wait_batches()
+    check([g.chat_id for g in session.by_type(SendGift)[before:]][1:] == ["@batchflood", "@batch2", "@batchx"],
+          "непроверенным каналам подарок уходит по @username")
+    await feed(cb_update(ADMIN, A(s="cgb", a="new").pack()))
 
     print("НФТ подарки")
     session.members.add((-1002, 100))  # канал добавлен выше — пользователь подписывается и на него

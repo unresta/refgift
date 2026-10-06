@@ -3,7 +3,7 @@ import json
 import logging
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (CallbackQuery, KeyboardButton, KeyboardButtonRequestChat, Message, ReplyKeyboardMarkup,
                            ReplyKeyboardRemove)
@@ -190,6 +190,10 @@ async def on_add(message: Message, state: FSMContext, bot: Bot, settings: Settin
     try:
         chat = await bot.get_chat(target)
         chat_id, title, kind = chat.id, chat.title or str(chat.id), chat.type
+    except TelegramRetryAfter as e:
+        await message.answer(f"⏳ Telegram временно ограничил поиск каналов по юзернейму — попробуйте через "
+                             f"{max(1, e.retry_after // 60)} мин., пришлите ID канала или перешлите из него пост.")
+        return
     except TelegramAPIError:
         # Приватный канал без бота: get_chat недоступен, но подарок по ID отправить можно.
         if not isinstance(target, int):

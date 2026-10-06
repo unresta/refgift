@@ -34,7 +34,8 @@ STOP_ERRORS = ("BALANCE", "STARS")  # звёзд не хватает — ост�
 
 @dataclass
 class Batch:
-    channels: dict[int, str] = field(default_factory=dict)  # chat_id → название, в порядке добавления
+    # chat_id → название, в порядке добавления; "@username" — канал, который не удалось проверить (лимит Telegram)
+    channels: dict[int | str, str] = field(default_factory=dict)
     gift_id: str = ""
     comment: str | None = None
     running: bool = False
@@ -55,38 +56,65 @@ async def wait_batches() -> None:
         await asyncio.gather(*list(_tasks), return_exceptions=True)
 
 
-async def resolve(bot: Bot, target: int | str) -> tuple[int, str] | str:
-    """Канал → (chat_id, название) или текст ошибки."""
+class Unchecked(Exception):
+    """Проверить канал не получилось (лимит запросов) — добавим без проверки."""
+
+
+async def resolve(bot: Bot, target: int | str) -> tuple[int | str, str] | str:
+    """Канал → (chat_id, название) или текст ошибки. Unchecked — Telegram не дал проверить."""
     try:
         chat = await bot.get_chat(target)
-    except TelegramAPIError:
+    except TelegramRetryAfter:
+        raise Unchecked
+    except TelegramBadRequest as e:
         # Приватный канал без бота: get_chat недоступен, но подарок по ID отправить можно.
-        return (target, str(target)) if isinstance(target, int) else "не найден"
+        if isinstance(target, int):
+            return target, str(target)
+        if "not found" in e.message.lower():
+            return "не найден"
+        raise Unchecked
+    except TelegramAPIError as e:
+        log.warning("get_chat(%s): %s", target, e)
+        raise Unchecked
     if chat.type != "channel":
         return "это не канал"
     return chat.id, chat.title or str(chat.id)
 
 
-async def add_targets(bot: Bot, batch: Batch, targets: list[tuple[str, int | str]]) -> tuple[int, list[str]]:
-    """Добавляет каналы в пачку. Возвращает (сколько добавлено, ошибки)."""
-    sem = asyncio.Semaphore(5)
+async def add_targets(bot: Bot, batch: Batch, targets: list[tuple[str, int | str]]) -> tuple[int, list[str], int]:
+    """Добавляет каналы в пачку. Возвращает (сколько добавлено, ошибки, сколько без проверки).
 
-    async def one(target: int | str):
-        async with sem:
-            return await resolve(bot, target)
-
-    results = await asyncio.gather(*(one(t) for _, t in targets))
-    added, errors = 0, []
-    for (label, _), result in zip(targets, results):
+    Поиск канала по @username у Telegram сильно ограничен по частоте, поэтому проверяем по одному, а упёршись
+    в лимит — добавляем остальные как есть: send_gift принимает @username напрямую.
+    """
+    added, errors, unchecked, limited = 0, [], 0, False
+    for label, target in targets:
+        shown = str(target)  # для списка — как прислал админ
+        if isinstance(target, str):
+            target = target.lower()  # юзернеймы не зависят от регистра
+        if target in batch.channels:
+            continue
+        result: tuple[int | str, str] | str
+        if limited:
+            result = (target, shown)
+        else:
+            try:
+                result = await resolve(bot, target)
+            except Unchecked:
+                limited = True
+                result = (target, shown)
         if isinstance(result, str):
             errors.append(f"{esc(label)} — {result}")
-        elif result[0] not in batch.channels:
-            if len(batch.channels) >= BATCH_MAX:
-                errors.append(f"{esc(label)} — в пачке уже {BATCH_MAX} каналов")
-                continue
-            batch.channels[result[0]] = result[1]
-            added += 1
-    return added, errors
+            continue
+        if result[0] in batch.channels:
+            continue
+        if len(batch.channels) >= BATCH_MAX:
+            errors.append(f"{esc(label)} — в пачке уже {BATCH_MAX} каналов")
+            continue
+        batch.channels[result[0]] = result[1]
+        added += 1
+        unchecked += limited and isinstance(result[0], str)
+    return added, errors, unchecked
 
 
 # ---------- шаг 1: каналы ----------
@@ -135,7 +163,7 @@ async def cb_quick_add(call: CallbackQuery, callback_data: A, callback_answer: C
         targets = [(ch["title"], ch["chat_id"]) for ch in await db.channels()]
     else:
         targets = [(title, cid) for cid, title in recent(settings)]
-    added, errors = await add_targets(bot, batch, targets)
+    added, errors, _ = await add_targets(bot, batch, targets)
     callback_answer.text = (f"➕ Добавлено: {added}" + (f", пропущено: {len(errors)}" if errors else "")
                             if targets else "Список пуст")
     await show_builder(call, state, batch)
@@ -150,11 +178,14 @@ async def on_channels(message: Message, state: FSMContext, bot: Bot) -> None:
     else:
         targets = [("пересланный пост", extract_target(message))]
     bad = [f"{esc(label)} — не похоже на канал" for label, t in targets if t is None]
-    added, errors = await add_targets(bot, batch, [(label, t) for label, t in targets if t is not None])
+    added, errors, unchecked = await add_targets(bot, batch, [(label, t) for label, t in targets if t is not None])
     errors = bad + errors
 
     await drop_prompt(message, state)
     report = f"➕ Добавлено каналов: <b>{added}</b>"
+    if unchecked:
+        report += (f"\nℹ️ Из них {unchecked} — без проверки: Telegram временно ограничил поиск каналов по "
+                   "юзернейму. Если какого-то канала нет, это будет видно в отчёте после отправки.")
     if errors:
         report += f"\n⚠️ Не добавлено: {len(errors)}\n" + "\n".join(errors[:15])
         if len(errors) > 15:
