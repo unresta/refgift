@@ -105,6 +105,15 @@ class FakeSession(BaseSession):
                                  "sticker": {**sticker, "emoji": "💎"}},
                                 {"id": "g_soldout", "star_count": 99, "remaining_count": 0,
                                  "sticker": {**sticker, "emoji": "🏆"}}])
+        if isinstance(method, GetChat) and str(method.chat_id).startswith("@batch"):
+            name = method.chat_id[1:]
+            if "missing" in name:
+                raise TelegramBadRequest(method=method, message="Bad Request: chat not found")
+            return ChatFullInfo(id=-2000000 - sum(map(ord, name)), type="supergroup" if "group" in name else "channel",
+                                title=name.capitalize(), accent_color_id=0, max_reaction_count=0,
+                                accepted_gift_types={"unlimited_gifts": True, "limited_gifts": True,
+                                                     "unique_gifts": True, "premium_subscription": True,
+                                                     "gifts_from_channels": True})
         if isinstance(method, GetChat):
             return ChatFullInfo(id=-1002, type="channel", title="Private Chan", accent_color_id=0,
                                 max_reaction_count=0, accepted_gift_types={
@@ -441,6 +450,61 @@ async def scenario(dp, db, bot, session) -> None:
     session.gift_error = None
     check("Отправлено: <b>0</b>" in session.screen().text and "BALANCE_TOO_LOW" in session.screen().text,
           "ошибка отправки показана админу")
+
+    print("Подарки на каналы пачкой")
+    from bot.handlers.admin import channel_gift_batch as cgb_mod
+    cgb_mod.SEND_DELAY = 0
+    await feed(cb_update(ADMIN, A(s="cgift").pack()))
+    check("Пачкой на несколько каналов" in str(session.screen().reply_markup), "кнопка пакетной отправки")
+    await feed(cb_update(ADMIN, A(s="cgb").pack()))
+    await feed(msg_update(ADMIN, "@batch1\n@batch2, t.me/batch3 @batch1 привет @batchgroup @batchmissing -100777"))
+    report = session.texts_to(ADMIN)[-2]
+    batch = cgb_mod.batch_of(ADMIN)
+    check("Добавлено каналов: <b>4</b>" in report and "Не добавлено: 3" in report and "привет — не похоже" in report
+          and "@batchgroup — это не канал" in report and "@batchmissing — не найден" in report,
+          "список каналов одним сообщением: дубли убраны, ошибки объяснены")
+    check(len(batch.channels) == 4 and "Каналов в пачке: <b>4</b>" in session.screen().text,
+          "в пачке 4 канала, экран ждёт ещё")
+    await feed(cb_update(ADMIN, A(s="cgb", a="recent").pack()))
+    check(len(batch.channels) == 4, "недавние уже в пачке — без дублей")
+    await feed(cb_update(ADMIN, A(s="cgb", a="gifts").pack()))
+    check("🌹 25⭐ · 100" in str(session.screen().reply_markup), "подарки с итогом за пачку")
+    await feed(cb_update(ADMIN, A(s="cgb", a="gift", v="g_rose").pack()))
+    await feed(msg_update(ADMIN, "Ура <3"))
+    check("Итого: <b>100</b>" in session.screen().text and "«Ура &lt;3»" in session.screen().text,
+          "подтверждение: сумма и комментарий")
+    before = len(session.by_type(SendGift))
+    await feed(cb_update(ADMIN, A(s="cgb", a="send").pack()))
+    await cgb_mod.wait_batches()
+    sent = session.by_type(SendGift)[before:]
+    check(len(sent) == 4 and {g.chat_id for g in sent} == set(batch.channels)
+          and all(g.gift_id == "g_rose" and g.text == "Ура &lt;3" and g.user_id is None for g in sent),
+          "4 подарка ушли на 4 канала с комментарием")
+    check("Пачка отправлена" in session.screen().text and "Отправлено: <b>4</b> из 4" in session.screen().text,
+          "итоговый отчёт")
+
+    session.gift_error = "BALANCE_TOO_LOW"
+    await feed(cb_update(ADMIN, A(s="cgb", a="gift", v="g_bear").pack()))
+    await feed(cb_update(ADMIN, A(s="cgb", a="none").pack()))
+    before = len(session.by_type(SendGift))
+    await feed(cb_update(ADMIN, A(s="cgb", a="send").pack()))
+    await cgb_mod.wait_batches()
+    session.gift_error = None
+    check(len(session.by_type(SendGift)) == before + 1 and session.by_type(SendGift)[-1].text is None
+          and "не хватает звёзд — не отправлено: <b>3</b>" in session.screen().text.lower(),
+          "звёзды кончились — остальные не отправляем, отчёт с причиной")
+
+    cgb_mod.SEND_DELAY = 0.05
+    before = len(session.by_type(SendGift))
+    await feed(cb_update(ADMIN, A(s="cgb", a="send").pack()))
+    await feed(cb_update(ADMIN, A(s="cgb", a="send").pack()))
+    await feed(cb_update(ADMIN, A(s="cgb", a="stop").pack()))
+    await cgb_mod.wait_batches()
+    cgb_mod.SEND_DELAY = 0
+    check(len(session.by_type(SendGift)) - before < 4 and "Пачка остановлена" in session.screen().text,
+          "повторное нажатие не запускает вторую отправку, «Стоп» останавливает")
+    await feed(cb_update(ADMIN, A(s="cgb", a="new").pack()))
+    check(not batch.channels, "новая пачка — список очищен")
 
     print("НФТ подарки")
     session.members.add((-1002, 100))  # канал добавлен выше — пользователь подписывается и на него

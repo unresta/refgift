@@ -74,6 +74,7 @@ async def targets_screen(db: Database, settings: Settings):
             "он появится в профиле канала.\n\n"
             "Выберите канал из списка или укажите другой.")
     rows.append([btn("➕ Другой канал", "cgift", "add", style="success")])
+    rows.append([btn("📦 Пачкой на несколько каналов", "cgb", style="primary")])
     rows.append(back())
     return text, kb(*rows)
 

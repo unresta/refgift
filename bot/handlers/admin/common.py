@@ -68,6 +68,8 @@ class Input(StatesGroup):
     rl_weight = State()
     cgift_target = State()
     cgift_text = State()
+    cgb_channels = State()
+    cgb_comment = State()
     nft_add = State()
     nft_field = State()
     nft_contact = State()

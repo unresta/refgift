@@ -207,6 +207,19 @@ async def cb_add(call: CallbackQuery, state: FSMContext) -> None:
     )
 
 
+def parse_target(raw: str) -> int | str | None:
+    """ID, @username или ссылка t.me/username → цель для get_chat."""
+    raw = raw.strip()
+    if raw.lstrip("-").isdigit():
+        return int(raw)
+    m = re.match(r"^(?:https?://)?(?:t\.me|telegram\.me)/([A-Za-z]\w{3,})/?$", raw)
+    if m:
+        return "@" + m.group(1)
+    if re.match(r"^@[A-Za-z]\w{3,}$", raw):
+        return raw
+    return None
+
+
 def extract_target(message: Message) -> int | str | None:
     if message.chat_shared:
         return message.chat_shared.chat_id
@@ -216,14 +229,7 @@ def extract_target(message: Message) -> int | str | None:
     if isinstance(origin, MessageOriginChat):
         return origin.sender_chat.id
     if message.text:
-        raw = message.text.strip()
-        if raw.lstrip("-").isdigit():
-            return int(raw)
-        m = re.match(r"^(?:https?://)?(?:t\.me|telegram\.me)/([A-Za-z]\w{3,})/?$", raw)
-        if m:
-            return "@" + m.group(1)
-        if re.match(r"^@[A-Za-z]\w{3,}$", raw):
-            return raw
+        return parse_target(message.text)
     return None
 
 
