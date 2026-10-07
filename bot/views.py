@@ -80,11 +80,11 @@ def menu_screen(user: Row, settings: Settings, has_pending_claim: bool, is_admin
     rows.append([Btn(text="👥 Мои друзья", callback_data=U(a="friends").pack()),
                  Btn(text="🏆 Топ", callback_data=U(a="top").pack())])
     if has_shop:
-        rows.append([Btn(text="🛍 Купить подарок", callback_data=U(a="shop").pack())])
+        rows.append([Btn(text="🛍 ПОДАРКИ ДЕШЕВЛЕ ЧЕМ В ТГ", style="success", callback_data=U(a="shop").pack())])
+    if has_nft:
+        rows.append([Btn(text="💎 НФТ подарки", style="primary", callback_data=U(a="nft").pack())])
     if settings.webapp_url and settings.flag("roulette_enabled"):
         rows.append([Btn(text="🎰 Рулетка подарков", web_app=WebAppInfo(url=settings.webapp_url))])
-    if has_nft:
-        rows.append([Btn(text="💎 НФТ подарки", callback_data=U(a="nft").pack())])
     rows.append([Btn(text="❓ Как это работает", callback_data=U(a="rules").pack())])
     if is_admin:
         rows.append([Btn(text="🛠 Админ-панель", callback_data=A(s="home").pack())])

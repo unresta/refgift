@@ -822,7 +822,13 @@ async def scenario(dp, db, bot, session) -> None:
         return answer.ok, answer.error_message or ""
 
     await feed(cb_update(100, U(a="menu").pack()))
-    check("Купить подарок" in str(session.screen().reply_markup), "в меню кнопка магазина")
+    menu = [b for row in session.screen().reply_markup.inline_keyboard for b in row]
+    shop_btn = next(b for b in menu if b.text == "🛍 ПОДАРКИ ДЕШЕВЛЕ ЧЕМ В ТГ")
+    nft_btn = next(b for b in menu if b.text == "💎 НФТ подарки")
+    roulette_btn = next(b for b in menu if b.web_app)
+    check(shop_btn.style == "success" and nft_btn.style == "primary"
+          and menu.index(shop_btn) < menu.index(nft_btn) < menu.index(roulette_btn),
+          "меню: магазин зелёный, НФТ синие и выше рулетки")
     await feed(cb_update(100, U(a="shop").pack()))
     markup = str(session.screen().reply_markup)
     check("🧸 мишка - 15 ⭐" in markup and "🌹" not in markup,
@@ -922,7 +928,7 @@ async def scenario(dp, db, bot, session) -> None:
           and "возвратов 1" in session.screen().text, "статистика продаж")
     await feed(cb_update(ADMIN, A(s="shop", a="t").pack()))
     await feed(cb_update(100, U(a="menu").pack()))
-    check("Купить подарок" not in str(session.screen().reply_markup)
+    check("ДЕШЕВЛЕ ЧЕМ В ТГ" not in str(session.screen().reply_markup)
           and not (await shop_checkout("shop:g_bear:20:0", 20))[0], "магазин закрыт — ни кнопки, ни оплаты")
     await feed(cb_update(ADMIN, A(s="shop", a="t").pack()))
 
