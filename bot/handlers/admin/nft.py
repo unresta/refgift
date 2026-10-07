@@ -92,6 +92,7 @@ async def main_screen(db: Database, settings: Settings, userbot: Userbot):
         "💎 <b>НФТ подарки</b>\n",
         "В меню бота есть раздел «💎 НФТ подарки». Пользователь выбирает подарок и видит инструкцию: "
         "написать админу и ждать подарок.\n",
+        f"Раздел в меню: {'🟢 <b>показан</b>' if settings.flag('nft_enabled') else '🔴 <b>скрыт</b> — пользователи его не видят'}",
         f"🤖 Юзербот: {ub_short(userbot, settings)}",
         f"🎁 Подарков: <b>{len(gifts)}</b> · показываются: <b>{active}</b>",
         f"🔗 Ссылки на чат: <b>{linked}</b> из {len(gifts)} — у каждого подарка своя, с готовым сообщением",
@@ -101,19 +102,25 @@ async def main_screen(db: Database, settings: Settings, userbot: Userbot):
     if gifts and linked < len(gifts):
         lines.append("\n⚠️ <i>Не у всех подарков есть ссылка на чат — для них кнопка «Написать админу» "
                      "ведёт на запасную ссылку. Подключите юзербота и нажмите «🔄 Обновить ссылки».</i>")
-    if not active:
+    if not active and settings.flag("nft_enabled"):
         lines.append("\n<i>Кнопка «💎 НФТ подарки» появится в меню, когда будет хотя бы один видимый подарок.</i>")
     rows = [[btn(f"{'🟢' if g['is_active'] else '🔴'} {g['title']}" + (f" · {g['price']}" if g["price"] else ""),
                  "nft", "card", id=g["id"])] for g in gifts]
     rows.append([btn("➕ Добавить подарок", "nft", "add", style="success")])
     rows.append([btn("💬 Текст сообщения", "nft", "msg"), btn("🔄 Обновить ссылки", "nft", "sync")])
     rows.append([btn("🤖 Юзербот", "ub"), btn("✍️ Запасная ссылка", "nft", "contact")])
+    rows.append([btn("🔴 Скрыть раздел из меню", "nft", "t", style="danger") if settings.flag("nft_enabled")
+                 else btn("🟢 Показать раздел в меню", "nft", "t", style="success")])
     rows.append(back())
     return "\n".join(lines), kb(*rows)
 
 
-@router.callback_query(A.filter((F.s == "nft") & (F.a == "open")))
-async def cb_open(call: CallbackQuery, db: Database, settings: Settings, userbot: Userbot) -> None:
+@router.callback_query(A.filter((F.s == "nft") & F.a.in_({"open", "t"})))
+async def cb_open(call: CallbackQuery, callback_data: A, callback_answer: CallbackAnswer, db: Database,
+                  settings: Settings, userbot: Userbot) -> None:
+    if callback_data.a == "t":
+        shown = await settings.toggle("nft_enabled")
+        callback_answer.text = "🟢 Раздел показан в меню" if shown else "🔴 Раздел скрыт из меню"
     await show(call, *await main_screen(db, settings, userbot))
 
 

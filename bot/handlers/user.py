@@ -61,7 +61,7 @@ async def open_menu(event: Message | CallbackQuery, user_id: int, db: Database, 
     user = await db.get_user(user_id)
     assert user is not None
     pending = await db.user_pending_claim(user_id)
-    has_nft = await db.count_nft_gifts(only_active=True) > 0
+    has_nft = settings.flag("nft_enabled") and await db.count_nft_gifts(only_active=True) > 0
     await show(event, *menu_screen(user, settings, pending is not None, is_admin, has_nft,
                                    settings.flag("shop_enabled")))
 
@@ -205,13 +205,22 @@ async def show_nft_list(call: CallbackQuery, db: Database, settings: Settings, p
 
 
 @router.callback_query(U.filter(F.a == "nft"))
-async def cb_nft(call: CallbackQuery, callback_data: U, db: Database, settings: Settings) -> None:
+async def cb_nft(call: CallbackQuery, callback_data: U, callback_answer: CallbackAnswer, user: Row, db: Database,
+                 settings: Settings, is_admin: bool) -> None:
+    if not settings.flag("nft_enabled"):
+        callback_answer.text = "Раздел сейчас недоступен"
+        await open_menu(call, user["user_id"], db, settings, is_admin)
+        return
     await show_nft_list(call, db, settings, callback_data.p)
 
 
 @router.callback_query(U.filter(F.a == "nftg"))
-async def cb_nft_gift(call: CallbackQuery, callback_data: U, callback_answer: CallbackAnswer, db: Database,
-                      settings: Settings, userbot: Userbot) -> None:
+async def cb_nft_gift(call: CallbackQuery, callback_data: U, callback_answer: CallbackAnswer, user: Row,
+                      db: Database, settings: Settings, userbot: Userbot, is_admin: bool) -> None:
+    if not settings.flag("nft_enabled"):
+        callback_answer.text = "Раздел сейчас недоступен"
+        await open_menu(call, user["user_id"], db, settings, is_admin)
+        return
     gift = await db.get_nft_gift(callback_data.p)
     if gift is None or not gift["is_active"]:
         callback_answer.text = "Этот подарок больше недоступен"

@@ -667,6 +667,20 @@ async def scenario(dp, db, bot, session) -> None:
     await feed(cb_update(ADMIN, A(s="nft", a="del_ok", id=cap["id"]).pack()))
     check(await db.get_nft_gift(cap["id"]) is None, "подарок удалён")
 
+    await feed(cb_update(ADMIN, A(s="nft", a="t").pack()))
+    check("🔴 <b>скрыт</b>" in session.screen().text and "Показать раздел" in str(session.screen().reply_markup)
+          and not settings.flag("nft_enabled"), "админ скрыл раздел НФТ")
+    await feed(cb_update(100, U(a="menu").pack()))
+    check("НФТ подарки" not in str(session.screen().reply_markup), "скрытый раздел — кнопки в меню нет")
+    views = (await db.get_nft_gift(nft["id"]))["views"]
+    await feed(cb_update(100, U(a="nftg", p=nft["id"]).pack()))
+    await feed(cb_update(100, U(a="nft").pack()))
+    check("НФТ подарки" not in str(session.screen().reply_markup) and "Пригласить друзей" in str(session.screen().reply_markup)
+          and (await db.get_nft_gift(nft["id"]))["views"] == views, "старые кнопки скрытого раздела ведут в меню")
+    await feed(cb_update(ADMIN, A(s="nft", a="t").pack()))
+    await feed(cb_update(100, U(a="menu").pack()))
+    check("НФТ подарки" in str(session.screen().reply_markup), "раздел снова показан")
+
     print("Юзербот")
     from types import SimpleNamespace
     from telethon.tl import types as tl
