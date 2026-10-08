@@ -857,21 +857,19 @@ async def scenario(dp, db, bot, session) -> None:
     await settings.set("giveaway_url", "https://t.me/giveaways")
     await feed(cb_update(100, U(a="menu").pack()))
     menu = [b for row in session.screen().reply_markup.inline_keyboard for b in row]
-    check([(b.text, b.icon_custom_emoji_id) for b in menu[:6]] == [
-        ("Получить подарки!", views.ICON_GIFTS), ("Заработать звёзды", views.ICON_EARN),
+    check([(b.text, b.icon_custom_emoji_id) for b in menu[:7]] == [
+        ("Получить подарки!", views.ICON_GIFTS), ("💎 НФТ подарки", None), ("Заработать звёзды", views.ICON_EARN),
         ("Ежедневный кейс", views.ICON_DAILY), ("Купить подарки", views.ICON_SHOP), ("👤 Профиль / Баланс", None),
-        ("Мой канал с раздачами", views.ICON_CHANNEL)], "главное меню: кнопки по порядку с премиум-эмодзи")
-    check(menu[0].style == "success" and menu[5].style == "primary" and menu[5].url == "https://t.me/giveaways",
-          "«Получить подарки» зелёная, канал с раздачами — синяя ссылка из админки")
-    nft_btn = next(b for b in menu if b.text == "💎 НФТ подарки")
-    roulette_btn = next(b for b in menu if b.web_app)
-    check(nft_btn.style == "primary" and menu.index(menu[3]) < menu.index(nft_btn) < menu.index(roulette_btn),
-          "меню: НФТ синие, ниже магазина и выше рулетки")
+        ("Мой канал с раздачами", views.ICON_CHANNEL)], "главное меню: кнопки по порядку, НФТ на втором месте")
+    check(menu[0].style == "success" and menu[1].style == "primary" and menu[6].style == "primary"
+          and menu[6].url == "https://t.me/giveaways",
+          "«Получить подарки» зелёная, НФТ и канал с раздачами — синие")
     session.reject_icons = True
     await feed(cb_update(100, U(a="menu").pack()))
     session.reject_icons = False
     texts = [b.text for row in session.screen().reply_markup.inline_keyboard for b in row]
-    check(texts[:4] == ["🎁 Получить подарки!", "⭐ Заработать звёзды", "📦 Ежедневный кейс", "🛍 Купить подарки"],
+    check(texts[:5] == ["🎁 Получить подарки!", "💎 НФТ подарки", "⭐ Заработать звёзды", "📦 Ежедневный кейс",
+                        "🛍 Купить подарки"],
           "без Telegram Premium у владельца — обычные эмодзи вместо премиум")
     await settings.set("giveaway_url", "")
     await feed(cb_update(100, U(a="menu").pack()))

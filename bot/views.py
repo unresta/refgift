@@ -73,6 +73,10 @@ def main_menu_screen(user: Row, settings: Settings, is_admin: bool, has_nft: boo
                            balance=fmt_stars(user["balance"]))
     rows: list[list[Btn]] = [
         [icon_btn("Получить подарки!", ICON_GIFTS, "🎁", style="success", callback_data=U(a="refs").pack())],
+    ]
+    if has_nft:
+        rows.append([Btn(text="💎 НФТ подарки", style="primary", callback_data=U(a="nft").pack())])
+    rows += [
         [icon_btn("Заработать звёзды", ICON_EARN, "⭐", callback_data=U(a="tasks").pack())],
         [icon_btn("Ежедневный кейс", ICON_DAILY, "📦", callback_data=U(a="cases").pack())],
     ]
@@ -81,8 +85,6 @@ def main_menu_screen(user: Row, settings: Settings, is_admin: bool, has_nft: boo
     rows.append([Btn(text="👤 Профиль / Баланс", callback_data=U(a="profile").pack())])
     if url := settings.get("giveaway_url"):
         rows.append([icon_btn("Мой канал с раздачами", ICON_CHANNEL, "📣", style="primary", url=url)])
-    if has_nft:
-        rows.append([Btn(text="💎 НФТ подарки", style="primary", callback_data=U(a="nft").pack())])
     if settings.webapp_url and settings.flag("roulette_enabled"):
         rows.append([Btn(text="🎰 Рулетка подарков", web_app=WebAppInfo(url=settings.webapp_url))])
     if is_admin:
