@@ -17,7 +17,9 @@ from bot.handlers import inline, user
 from bot.handlers.admin import build_admin_router
 from bot.middlewares import ClearUserInput, SubscriptionGate, ThrottlingMiddleware, UserMiddleware
 from bot.services.admins import AdminRegistry
+from bot.services.banner import Banner
 from bot.services.broadcast import Broadcaster
+from bot.services.cases import CaseService
 from bot.services.checks import CheckService
 from bot.services.gifts import GiftCatalog, GiftImages
 from bot.services.reminders import ReminderService
@@ -27,6 +29,7 @@ from bot.web.media import GiftMedia
 from bot.web.server import WebContext, create_app
 from bot.services.rewards import RewardService
 from bot.services.subscription import SubscriptionService
+from bot.services.tasks import TaskService
 from bot.services.userbot import Userbot
 from bot.settings import Settings
 
@@ -60,6 +63,7 @@ async def build(config: Config, bot: Bot) -> tuple[Dispatcher, Database, AdminRe
         roulette=roulette, catalog=catalog, userbot=Userbot(config, db, settings),
         shop=ShopService(bot, db, settings, rewards, catalog, admins, me.username),
         web=WebContext(bot, db, settings, subs, rewards, roulette, catalog, media, admins),
+        banner=Banner(bot, settings), tasks=TaskService(bot, db), cases=CaseService(db, rewards),
         bot_username=me.username,
     )
 
@@ -90,6 +94,7 @@ async def main() -> None:
     await dp["roulette"].seed_defaults()
     await dp["roulette"].upgrade_default_weights()
     await dp["roulette"].recover()  # выигрыши, оплаченные до перезапуска
+    await dp["cases"].seed_defaults()
     dp["userbot"].launch()
 
     runner = web.AppRunner(create_app(dp["web"]), access_log=None)

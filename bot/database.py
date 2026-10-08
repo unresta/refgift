@@ -224,6 +224,71 @@ CREATE TABLE IF NOT EXISTS check_activations (
     created_at INTEGER NOT NULL,
     PRIMARY KEY (check_id, user_id)
 );
+
+-- Звёзды на балансе в боте (users.balance) — в сотых долях звезды: 25 = 0.25 ⭐.
+CREATE TABLE IF NOT EXISTS tasks (            -- задания «Заработать звёзды»
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT    NOT NULL,              -- sub — подписка | boost — буст | link — переход по ссылке
+    title      TEXT    NOT NULL,              -- текст кнопки
+    chat_id    INTEGER,                       -- канал (sub, boost)
+    chat_title TEXT,
+    url        TEXT,                          -- куда ведёт кнопка «Перейти»
+    reward     INTEGER NOT NULL,              -- награда, сотые доли звезды
+    style      TEXT,                          -- цвет кнопки: success | primary | danger | NULL
+    max_done   INTEGER NOT NULL DEFAULT 0,    -- лимит выполнений (0 — без лимита)
+    done       INTEGER NOT NULL DEFAULT 0,
+    is_active  INTEGER NOT NULL DEFAULT 1,
+    position   INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS task_completions (
+    task_id    INTEGER NOT NULL,
+    user_id    INTEGER NOT NULL,
+    reward     INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (task_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_completions_user ON task_completions(user_id);
+
+CREATE TABLE IF NOT EXISTS cases (            -- кейсы за звёзды с баланса в боте
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT    NOT NULL,
+    emoji      TEXT,                          -- эмодзи перед названием
+    emoji_id   TEXT,                          -- премиум-эмодзи — иконка на кнопке
+    price      INTEGER NOT NULL,              -- сотые доли звезды
+    style      TEXT,
+    is_daily   INTEGER NOT NULL DEFAULT 0,    -- открывается раз в сутки
+    is_active  INTEGER NOT NULL DEFAULT 1,
+    position   INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS case_prizes (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id INTEGER NOT NULL,
+    kind    TEXT    NOT NULL,                 -- gift — подарок Telegram | stars — звёзды на баланс
+    gift_id TEXT,
+    emoji   TEXT,
+    value   INTEGER NOT NULL,                 -- сотые доли звезды: цена подарка или сумма на баланс
+    weight  REAL    NOT NULL                  -- шанс = вес / сумма весов кейса
+);
+CREATE INDEX IF NOT EXISTS idx_case_prizes_case ON case_prizes(case_id);
+
+CREATE TABLE IF NOT EXISTS case_opens (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    case_id    INTEGER NOT NULL,
+    case_name  TEXT,
+    price      INTEGER NOT NULL,
+    kind       TEXT    NOT NULL,
+    gift_id    TEXT,
+    emoji      TEXT,
+    value      INTEGER NOT NULL,
+    status     TEXT    NOT NULL,              -- opening | credited | sent | pending
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_case_opens_user ON case_opens(user_id, case_id, created_at);
 """
 
 # Колонки, добавленные после первого релиза: (таблица, колонка, определение)
@@ -243,6 +308,7 @@ MIGRATIONS = [
     ("shop_orders", "comment", "TEXT"),
     ("nft_gifts", "emoji_id", "TEXT"),      # премиум-эмодзи — иконка на кнопке подарка
     ("checks", "password", "TEXT"),         # пароль чека (NULL — без пароля)
+    ("users", "balance", "INTEGER NOT NULL DEFAULT 0"),  # звёзды в боте, сотые доли
 ]
 POST_MIGRATION_SQL = """
 CREATE INDEX IF NOT EXISTS idx_users_ad_link ON users(ad_link_id, created_at);
@@ -974,6 +1040,176 @@ class Database:
             "FROM spins WHERE paid_at IS NOT NULL AND paid_at >= ? GROUP BY case_id ORDER BY revenue DESC",
             since,
         )
+
+    # ---------- баланс в боте ----------
+    async def add_balance(self, user_id: int, delta: int) -> None:
+        await self.run("UPDATE users SET balance = balance + ? WHERE user_id = ?", delta, user_id)
+
+    async def spend_balance(self, user_id: int, amount: int) -> bool:
+        """Атомарно списывает звёзды, только если их хватает."""
+        return bool(await self.run(
+            "UPDATE users SET balance = balance - ? WHERE user_id = ? AND balance >= ?", amount, user_id, amount
+        ))
+
+    async def set_balance(self, user_id: int, value: int) -> None:
+        await self.run("UPDATE users SET balance = ? WHERE user_id = ?", value, user_id)
+
+    # ---------- задания ----------
+    async def tasks(self, only_active: bool = False) -> list[aiosqlite.Row]:
+        where = "WHERE is_active = 1" if only_active else ""
+        return await self.all(f"SELECT * FROM tasks {where} ORDER BY position, id")
+
+    async def available_tasks(self, user_id: int) -> list[aiosqlite.Row]:
+        return await self.all(
+            "SELECT * FROM tasks t WHERE is_active = 1 AND (max_done = 0 OR done < max_done) "
+            "AND NOT EXISTS (SELECT 1 FROM task_completions c WHERE c.task_id = t.id AND c.user_id = ?) "
+            "ORDER BY position, id", user_id,
+        )
+
+    async def get_task(self, task_id: int) -> aiosqlite.Row | None:
+        return await self.one("SELECT * FROM tasks WHERE id = ?", task_id)
+
+    async def is_task_chat(self, chat_id: int) -> bool:
+        return bool(await self.val("SELECT 1 FROM tasks WHERE chat_id = ? LIMIT 1", chat_id))
+
+    async def create_task(self, kind: str, title: str, reward: int, url: str | None,
+                          chat_id: int | None = None, chat_title: str | None = None) -> int:
+        position = await self.val("SELECT COALESCE(MAX(position), 0) + 1 FROM tasks")
+        cur = await self.conn.execute(
+            "INSERT INTO tasks (kind, title, chat_id, chat_title, url, reward, position, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (kind, title, chat_id, chat_title, url, reward, position, now()),
+        )
+        await self.conn.commit()
+        return cur.lastrowid or 0
+
+    async def update_task(self, task_id: int, **fields: Any) -> None:
+        assert set(fields) <= {"title", "url", "reward", "style", "max_done", "is_active"}, fields
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        await self.run(f"UPDATE tasks SET {sets} WHERE id = ?", *fields.values(), task_id)
+
+    async def move_task_up(self, task_id: int) -> None:
+        await self._move_up("tasks", task_id)
+
+    async def delete_task(self, task_id: int) -> None:
+        await self.run("DELETE FROM tasks WHERE id = ?", task_id)
+
+    async def complete_task(self, task: aiosqlite.Row, user_id: int) -> bool:
+        """Засчитывает задание и начисляет награду — один раз на пользователя и в пределах лимита."""
+        if not await self.run(
+            "INSERT OR IGNORE INTO task_completions (task_id, user_id, reward, created_at) VALUES (?, ?, ?, ?)",
+            task["id"], user_id, task["reward"], now(),
+        ):
+            return False
+        if not await self.run("UPDATE tasks SET done = done + 1 WHERE id = ? AND (max_done = 0 OR done < max_done)",
+                              task["id"]):
+            await self.run("DELETE FROM task_completions WHERE task_id = ? AND user_id = ?", task["id"], user_id)
+            return False
+        await self.add_balance(user_id, task["reward"])
+        return True
+
+    async def user_task_stats(self, user_id: int) -> tuple[int, int]:
+        row = await self.one("SELECT COUNT(*), COALESCE(SUM(reward), 0) FROM task_completions WHERE user_id = ?",
+                             user_id)
+        return (row[0], row[1]) if row else (0, 0)
+
+    async def task_stats(self, since: int = 0) -> tuple[int, int]:
+        row = await self.one("SELECT COUNT(*), COALESCE(SUM(reward), 0) FROM task_completions WHERE created_at >= ?",
+                             since)
+        return (row[0], row[1]) if row else (0, 0)
+
+    # ---------- кейсы за баланс ----------
+    async def cases(self, only_active: bool = False) -> list[aiosqlite.Row]:
+        where = "WHERE is_active = 1" if only_active else ""
+        return await self.all(f"SELECT * FROM cases {where} ORDER BY position, id")
+
+    async def get_case(self, case_id: int) -> aiosqlite.Row | None:
+        return await self.one("SELECT * FROM cases WHERE id = ?", case_id)
+
+    async def create_case(self, name: str, price: int, emoji: str | None = None, is_daily: bool = False) -> int:
+        position = await self.val("SELECT COALESCE(MAX(position), 0) + 1 FROM cases")
+        cur = await self.conn.execute(
+            "INSERT INTO cases (name, emoji, price, is_daily, position, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (name, emoji, price, int(is_daily), position, now()),
+        )
+        await self.conn.commit()
+        return cur.lastrowid or 0
+
+    async def update_case(self, case_id: int, **fields: Any) -> None:
+        assert set(fields) <= {"name", "emoji", "emoji_id", "price", "style", "is_daily", "is_active"}, fields
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        await self.run(f"UPDATE cases SET {sets} WHERE id = ?", *fields.values(), case_id)
+
+    async def move_case_up(self, case_id: int) -> None:
+        await self._move_up("cases", case_id)
+
+    async def delete_case(self, case_id: int) -> None:
+        await self.conn.execute("DELETE FROM case_prizes WHERE case_id = ?", (case_id,))
+        await self.conn.execute("DELETE FROM cases WHERE id = ?", (case_id,))
+        await self.conn.commit()
+
+    async def case_prizes(self, case_id: int) -> list[aiosqlite.Row]:
+        return await self.all("SELECT * FROM case_prizes WHERE case_id = ? ORDER BY value DESC, id", case_id)
+
+    async def get_case_prize(self, prize_id: int) -> aiosqlite.Row | None:
+        return await self.one("SELECT * FROM case_prizes WHERE id = ?", prize_id)
+
+    async def add_case_prize(self, case_id: int, kind: str, value: int, weight: float,
+                             gift_id: str | None = None, emoji: str | None = None) -> int:
+        cur = await self.conn.execute(
+            "INSERT INTO case_prizes (case_id, kind, gift_id, emoji, value, weight) VALUES (?, ?, ?, ?, ?, ?)",
+            (case_id, kind, gift_id, emoji, value, weight),
+        )
+        await self.conn.commit()
+        return cur.lastrowid or 0
+
+    async def set_case_prize_weight(self, prize_id: int, weight: float) -> None:
+        await self.run("UPDATE case_prizes SET weight = ? WHERE id = ?", weight, prize_id)
+
+    async def delete_case_prize(self, prize_id: int) -> None:
+        await self.run("DELETE FROM case_prizes WHERE id = ?", prize_id)
+
+    async def add_case_open(self, user_id: int, case: aiosqlite.Row, prize: aiosqlite.Row) -> int:
+        cur = await self.conn.execute(
+            "INSERT INTO case_opens (user_id, case_id, case_name, price, kind, gift_id, emoji, value, status, "
+            "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'opening', ?)",
+            (user_id, case["id"], case["name"], case["price"], prize["kind"], prize["gift_id"], prize["emoji"],
+             prize["value"], now()),
+        )
+        await self.conn.commit()
+        return cur.lastrowid or 0
+
+    async def set_case_open_status(self, open_id: int, status: str) -> None:
+        await self.run("UPDATE case_opens SET status = ? WHERE id = ?", status, open_id)
+
+    async def last_case_open(self, user_id: int, case_id: int) -> int | None:
+        return await self.val("SELECT MAX(created_at) FROM case_opens WHERE user_id = ? AND case_id = ?",
+                              user_id, case_id, default=None)
+
+    async def user_case_opens(self, user_id: int) -> int:
+        return await self.val("SELECT COUNT(*) FROM case_opens WHERE user_id = ?", user_id)
+
+    async def case_stats(self, since: int = 0) -> dict[int, aiosqlite.Row]:
+        """По кейсам: открытия, потрачено звёзд с баланса, выдано подарками и звёздами (сотые доли)."""
+        rows = await self.all(
+            "SELECT case_id, COUNT(*) AS opens, COUNT(DISTINCT user_id) AS players, SUM(price) AS spent, "
+            "COALESCE(SUM(CASE WHEN kind = 'gift' THEN value END), 0) AS gifts, "
+            "COALESCE(SUM(CASE WHEN kind = 'stars' THEN value END), 0) AS stars, "
+            "COALESCE(SUM(kind = 'gift' AND status = 'pending'), 0) AS pending "
+            "FROM case_opens WHERE created_at >= ? GROUP BY case_id", since,
+        )
+        return {r["case_id"]: r for r in rows}
+
+    async def _move_up(self, table: str, row_id: int) -> None:
+        rows = await self.all(f"SELECT id FROM {table} ORDER BY position, id")
+        ids = [r["id"] for r in rows]
+        if row_id not in ids or ids.index(row_id) == 0:
+            return
+        i = ids.index(row_id)
+        ids[i - 1], ids[i] = ids[i], ids[i - 1]
+        for pos, rid in enumerate(ids, 1):
+            await self.conn.execute(f"UPDATE {table} SET position = ? WHERE id = ?", (pos, rid))
+        await self.conn.commit()
 
     # ---------- НФТ подарки ----------
     async def nft_gifts(self, only_active: bool = False) -> list[aiosqlite.Row]:

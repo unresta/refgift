@@ -12,7 +12,7 @@ from bot.services.admins import AdminRegistry
 from bot.services.rewards import RewardService, calc_progress
 from bot.services.subscription import SubscriptionService
 from bot.settings import Settings
-from bot.utils import esc, fmt_dt, show, user_link
+from bot.utils import esc, fmt_dt, fmt_stars, parse_stars, show, user_link
 
 router = Router(name="admin_users")
 
@@ -45,6 +45,8 @@ async def card_screen(db: Database, settings: Settings, config: Config, subs: Su
     ad_link = await db.get_ad_link(u["ad_link_id"]) if u["ad_link_id"] else None
     pending_claim = await db.user_pending_claim(user_id)
     rank = await db.user_rank(user_id)
+    tasks_done, earned = await db.user_task_stats(user_id)
+    case_opens = await db.user_case_opens(user_id)
 
     username = f" · @{esc(u['username'])}" if u["username"] else ""
     badges = []
@@ -72,6 +74,8 @@ async def card_screen(db: Database, settings: Settings, config: Config, subs: Su
         f"📊 Прогресс: {p.current}/{p.goal} {p.bar}",
         f"🧸 Наград получено: <b>{u['rewards_claimed']}</b> · доступно: <b>{p.available}</b>"
         + (" · ⏳ есть заявка" if pending_claim else ""),
+        f"💳 Баланс в боте: <b>{fmt_stars(u['balance'])}</b> ⭐ · заданий: {tasks_done} "
+        f"(+{fmt_stars(earned)} ⭐) · кейсов: {case_opens}",
     ]
     uid = user_id
     rows = [
@@ -79,6 +83,7 @@ async def card_screen(db: Database, settings: Settings, config: Config, subs: Su
         [btn(f"👥 Его рефералы ({credited + pending})", "us", "refs", id=uid),
          btn("✉️ Написать", "us", "msg", id=uid)],
         [btn("🧸 Отправить мишку", "us", "gift", id=uid), btn("♻️ Сбросить награды", "us", "rreset", id=uid)],
+        [btn(f"💳 Баланс: {fmt_stars(u['balance'])} ⭐", "us", "bal", id=uid)],
     ]
     if pending_claim:
         rows.append([btn(f"🎁 Заявка #{pending_claim['id']}", "cl", "card", id=pending_claim["id"],
@@ -242,4 +247,37 @@ async def on_msg(message: Message, state: FSMContext, bot: Bot, db: Database, se
         await message.reply("⛔ Пользователь заблокировал бота")
     except TelegramAPIError as e:
         await message.reply(f"❌ Ошибка: {esc(e.message)}")
+    await show(message, *await card_screen(db, settings, config, subs, admins, target))
+
+
+# ---------- баланс в боте ----------
+
+@router.callback_query(A.filter((F.s == "us") & (F.a == "bal")))
+async def cb_balance(call: CallbackQuery, callback_data: A, state: FSMContext, db: Database) -> None:
+    u = await db.get_user(callback_data.id)
+    if not u:
+        return
+    await prompt(call, state, Input.user_balance,
+                 f"💳 <b>Баланс в боте: {fmt_stars(u['balance'])} ⭐</b>\n\n"
+                 "Пришлите <code>+5</code>, чтобы начислить, <code>-2.5</code>, чтобы списать, "
+                 "или <code>10</code>, чтобы установить точное значение.",
+                 back("us", "card", "✖️ Отмена", id=callback_data.id), target=callback_data.id)
+
+
+@router.message(Input.user_balance, F.text)
+async def on_balance(message: Message, state: FSMContext, db: Database, settings: Settings, config: Config,
+                     subs: SubscriptionService, admins: AdminRegistry) -> None:
+    raw = message.text.strip()
+    sign = raw[:1] if raw[:1] in ("+", "-") else ""
+    value = parse_stars(raw[1:] if sign else raw)
+    if value is None:
+        await message.answer("⚠️ Нужно число: <code>+5</code>, <code>-2.5</code> или <code>10</code>")
+        return
+    data = await drop_prompt(message, state)
+    await state.clear()
+    target = data["target"]
+    u = await db.get_user(target)
+    if u:
+        new = u["balance"] + value if sign == "+" else u["balance"] - value if sign == "-" else value
+        await db.set_balance(target, max(0, new))
     await show(message, *await card_screen(db, settings, config, subs, admins, target))

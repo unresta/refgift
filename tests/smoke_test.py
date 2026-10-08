@@ -46,6 +46,7 @@ class FakeSession(BaseSession):
         self.reject_icons = False  # как у бота, владелец которого без Telegram Premium
         self.gift_budget: int | None = None  # сколько подарков ещё «оплачено» — дальше BALANCE_TOO_LOW
         self.gift_refuse: set = set()  # каналы, которые не принимают подарки
+        self.boosts: set[tuple[int, int]] = set()  # (канал, пользователь) — отдан буст
 
     async def close(self) -> None:
         pass
@@ -90,6 +91,12 @@ class FakeSession(BaseSession):
             return _member(data)
         if isinstance(method, GetChatMemberCount):
             return 1234
+        if name == "GetUserChatBoosts":
+            from aiogram.types import UserChatBoosts
+            boosts = [{"boost_id": "b1", "add_date": 0, "expiration_date": 2_000_000_000,
+                       "source": {"source": "premium", "user": {"id": method.user_id, "is_bot": False,
+                                                                 "first_name": "U"}}}]
+            return UserChatBoosts(boosts=boosts if (method.chat_id, method.user_id) in self.boosts else [])
         if isinstance(method, GetMyStarBalance):
             return StarAmount(amount=self.balance)
         if isinstance(method, SendGift):
@@ -214,6 +221,15 @@ def payment_update(uid: int, payload: str, amount: int, charge: str) -> dict:
                                "telegram_payment_charge_id": charge, "provider_payment_charge_id": ""}}}
 
 
+def photo_cb_update(uid: int, data: str, unique_id: str) -> dict:
+    """Нажатие кнопки под сообщением с фото (например, под баннером)."""
+    upd = cb_update(uid, data)
+    msg = upd["callback_query"]["message"]
+    del msg["text"]
+    msg.update(caption="panel", photo=[{"file_id": "x", "file_unique_id": unique_id, "width": 1280, "height": 720}])
+    return upd
+
+
 def cb_update(uid: int, data: str) -> dict:
     return {"update_id": next(ids), "callback_query": {
         "id": str(next(ids)), "chat_instance": "x", "data": data,
@@ -276,6 +292,7 @@ async def main() -> None:
 async def scenario(dp, db, bot, session) -> None:
     settings = dp["settings"]
     await settings.set("sub_cache_ttl", 0)
+    await settings.set("banner_enabled", 0)  # экраны текстом; баннер проверяется отдельно
     feed = lambda upd: dp.feed_raw_update(bot, upd)  # noqa: E731
 
     await db.add_channel(CHANNEL, "Test Channel", "testchan", None)
@@ -288,7 +305,7 @@ async def scenario(dp, db, bot, session) -> None:
     session.members.add((CHANNEL, 100))
     await feed(cb_update(100, U(a="check").pack()))
     check((await db.get_user(100))["verified_at"] is not None, "подписка подтверждена")
-    check("Мишка за друзей" in session.texts_to(100)[-1], "после подписки — главное меню")
+    check("Заработать звёзды" in str(session.screen().reply_markup), "после подписки — главное меню")
 
     for friend in range(101, 106):
         await feed(msg_update(friend, "/start r100"))
@@ -306,8 +323,9 @@ async def scenario(dp, db, bot, session) -> None:
     await feed(cb_update(101, U(a="check").pack()))
     check((await db.get_user(100))["ref_count"] == 5, "повторная проверка не засчитывает дважды")
 
-    await feed(cb_update(100, U(a="menu").pack()))
-    check("Забрать мишку" in str(session.screen().reply_markup), "в меню кнопка «Забрать мишку»")
+    await feed(cb_update(100, U(a="refs").pack()))
+    check("Мишка за друзей" in session.screen().text and "Забрать мишку" in str(session.screen().reply_markup),
+          "«Получить подарки» — прогресс и кнопка «Забрать мишку»")
     await feed(cb_update(100, U(a="claim").pack()))
     gifts = session.by_type(SendGift)
     check(len(gifts) == 1 and gifts[0].user_id == 100, "подарок отправлен автоматически")
@@ -324,7 +342,7 @@ async def scenario(dp, db, bot, session) -> None:
         await feed(cb_update(100, U(a=uid).pack()))
     check("t.me/test_bot?start=r100" in session.texts_to(100)[-1], "ссылка-приглашение корректна")
     await feed(msg_update(100, "привет"))
-    check("Мишка за друзей" in session.texts_to(100)[-1], "любой текст — показываем меню")
+    check("Заработать звёзды" in str(session.screen().reply_markup), "любой текст — показываем меню")
 
     session.members.discard((CHANNEL, 100))
     await feed(cb_update(100, U(a="top").pack()))
@@ -392,7 +410,7 @@ async def scenario(dp, db, bot, session) -> None:
         "chat": {"id": -1002, "type": "channel", "title": "Private Chan"},
         "from": {"id": 301, "is_bot": False, "first_name": "U"}, "user_chat_id": 301, "date": int(time.time())}})
     await feed(cb_update(301, U(a="check").pack()))
-    check("Мишка за друзей" in session.texts_to(301)[-1], "заявка на вступление засчитывается как подписка")
+    check("Заработать звёзды" in str(session.screen().reply_markup), "заявка на вступление засчитывается как подписка")
 
     print("Пополнение баланса")
     await feed(cb_update(ADMIN, A(s="home").pack()))
@@ -675,7 +693,7 @@ async def scenario(dp, db, bot, session) -> None:
     views = (await db.get_nft_gift(nft["id"]))["views"]
     await feed(cb_update(100, U(a="nftg", p=nft["id"]).pack()))
     await feed(cb_update(100, U(a="nft").pack()))
-    check("НФТ подарки" not in str(session.screen().reply_markup) and "Пригласить друзей" in str(session.screen().reply_markup)
+    check("НФТ подарки" not in str(session.screen().reply_markup) and "Заработать звёзды" in str(session.screen().reply_markup)
           and (await db.get_nft_gift(nft["id"]))["views"] == views, "старые кнопки скрытого раздела ведут в меню")
     await feed(cb_update(ADMIN, A(s="nft", a="t").pack()))
     await feed(cb_update(100, U(a="menu").pack()))
@@ -835,14 +853,29 @@ async def scenario(dp, db, bot, session) -> None:
         answer = session.by_type(AnswerPreCheckoutQuery)[-1]
         return answer.ok, answer.error_message or ""
 
+    from bot import views
+    await settings.set("giveaway_url", "https://t.me/giveaways")
     await feed(cb_update(100, U(a="menu").pack()))
     menu = [b for row in session.screen().reply_markup.inline_keyboard for b in row]
-    shop_btn = next(b for b in menu if b.text == "🛍 ПОДАРКИ ДЕШЕВЛЕ ЧЕМ В ТГ")
+    check([(b.text, b.icon_custom_emoji_id) for b in menu[:6]] == [
+        ("Получить подарки!", views.ICON_GIFTS), ("Заработать звёзды", views.ICON_EARN),
+        ("Ежедневный кейс", views.ICON_DAILY), ("Купить подарки", views.ICON_SHOP), ("👤 Профиль / Баланс", None),
+        ("Мой канал с раздачами", views.ICON_CHANNEL)], "главное меню: кнопки по порядку с премиум-эмодзи")
+    check(menu[0].style == "success" and menu[5].style == "primary" and menu[5].url == "https://t.me/giveaways",
+          "«Получить подарки» зелёная, канал с раздачами — синяя ссылка из админки")
     nft_btn = next(b for b in menu if b.text == "💎 НФТ подарки")
     roulette_btn = next(b for b in menu if b.web_app)
-    check(shop_btn.style == "success" and nft_btn.style == "primary"
-          and menu.index(shop_btn) < menu.index(nft_btn) < menu.index(roulette_btn),
-          "меню: магазин зелёный, НФТ синие и выше рулетки")
+    check(nft_btn.style == "primary" and menu.index(menu[3]) < menu.index(nft_btn) < menu.index(roulette_btn),
+          "меню: НФТ синие, ниже магазина и выше рулетки")
+    session.reject_icons = True
+    await feed(cb_update(100, U(a="menu").pack()))
+    session.reject_icons = False
+    texts = [b.text for row in session.screen().reply_markup.inline_keyboard for b in row]
+    check(texts[:4] == ["🎁 Получить подарки!", "⭐ Заработать звёзды", "📦 Ежедневный кейс", "🛍 Купить подарки"],
+          "без Telegram Premium у владельца — обычные эмодзи вместо премиум")
+    await settings.set("giveaway_url", "")
+    await feed(cb_update(100, U(a="menu").pack()))
+    check("Мой канал с раздачами" not in str(session.screen().reply_markup), "нет ссылки на канал — кнопки нет")
     await feed(cb_update(100, U(a="shop").pack()))
     markup = str(session.screen().reply_markup)
     check("🧸 мишка - 15 ⭐" in markup and "🌹" not in markup,
@@ -1136,7 +1169,7 @@ async def scenario(dp, db, bot, session) -> None:
     check(session.by_type(SendGift)[-1].user_id == 510 and "Чек активирован" in session.texts_to(510)[-1],
           "верный пароль (регистр и пробелы не важны) — подарок отправлен")
     await feed(msg_update(510, "весна"))
-    check(len(session.by_type(SendGift)) == gifts_before + 1 and "Твой прогресс" in session.texts_to(510)[-1],
+    check(len(session.by_type(SendGift)) == gifts_before + 1 and "добро пожаловать" in session.texts_to(510)[-1],
           "после активации ввод пароля закончился — обычное меню")
 
     for word in ("1", "2", "3", "4", "5"):
@@ -1150,7 +1183,7 @@ async def scenario(dp, db, bot, session) -> None:
     await feed(msg_update(513, f"/start c_{pw_code}"))
     await feed(cb_update(513, U(a="menu").pack()))
     await feed(msg_update(513, "весна"))
-    check(len(session.by_type(SendGift)) == gifts_before + 1 and "Твой прогресс" in session.texts_to(513)[-1],
+    check(len(session.by_type(SendGift)) == gifts_before + 1 and "добро пожаловать" in session.texts_to(513)[-1],
           "ушёл в меню кнопкой — текст больше не считается паролем")
 
     session.members.discard((CHANNEL, 511))
@@ -1498,8 +1531,229 @@ async def scenario(dp, db, bot, session) -> None:
     check(stats and stats.finished and stats.sent == stats.total and stats.total > 5,
           f"рассылка завершена: {stats.sent}/{stats.total}")
 
+    await tasks_and_cases(dp, db, bot, session)
+
     await asyncio.sleep(0.1)
     print(f"\n✅ Все проверки пройдены: {passed}")
+
+
+async def tasks_and_cases(dp, db, bot, session) -> None:
+    from aiogram.methods import EditMessageCaption
+    from aiogram.types import FSInputFile
+
+    settings = dp["settings"]
+    feed = lambda upd: dp.feed_raw_update(bot, upd)  # noqa: E731
+    balance = lambda uid: db.val("SELECT balance FROM users WHERE user_id = ?", uid)  # noqa: E731
+    user_id = 700
+    await feed(msg_update(user_id, "/start"))
+    session.members.update({(CHANNEL, user_id), (-1002, user_id)})
+    await feed(cb_update(user_id, U(a="check").pack()))
+
+    print("Задания «Заработать звёзды»")
+    await feed(cb_update(ADMIN, A(s="tk").pack()))
+    check("Заданий пока нет" in session.screen().text, "админка заданий открывается")
+    await feed(cb_update(ADMIN, A(s="tk", a="new").pack()))
+    await feed(cb_update(ADMIN, A(s="tk", a="kind", v="sub").pack()))
+    await feed(msg_update(ADMIN, "", chat_shared={"request_id": 1, "chat_id": -1002}))
+    await feed(msg_update(ADMIN, "0"))
+    await feed(msg_update(ADMIN, "2"))
+    await feed(cb_update(ADMIN, A(s="tk", a="title_def").pack()))
+    sub = (await db.tasks())[-1]
+    check(sub["kind"] == "sub" and sub["chat_id"] == -1002 and sub["reward"] == 200
+          and sub["url"] == "https://t.me/+secret" and sub["title"] == "2⭐ за подписку",
+          "задание-подписка: канал кнопкой выбора, награда 2 ⭐, текст кнопки по умолчанию")
+
+    await feed(cb_update(ADMIN, A(s="tk", a="kind", v="boost").pack()))
+    await feed(msg_update(ADMIN, "@batchboost"))
+    await feed(msg_update(ADMIN, "1.5"))
+    await feed(msg_update(ADMIN, "2⭐ ЗА БУСТ!!!"))
+    boost = (await db.tasks())[-1]
+    check(boost["kind"] == "boost" and boost["reward"] == 150 and boost["title"] == "2⭐ ЗА БУСТ!!!"
+          and boost["url"].startswith("https://t.me/boost?c="), "задание-буст: ссылка на буст канала, свой текст")
+
+    await feed(cb_update(ADMIN, A(s="tk", a="kind", v="link").pack()))
+    await feed(msg_update(ADMIN, "не ссылка"))
+    await feed(msg_update(ADMIN, "https://example.com/bot"))
+    await feed(msg_update(ADMIN, "0.255"))
+    await feed(msg_update(ADMIN, "0,25"))
+    await feed(msg_update(ADMIN, "🔗 Наш канал с дешёвыми⭐"))
+    link = (await db.tasks())[-1]
+    check(link["kind"] == "link" and link["reward"] == 25 and link["url"] == "https://example.com/bot",
+          "задание-ссылка: «0,25» → 0.25 ⭐, три знака после запятой отклонены")
+    await feed(cb_update(ADMIN, A(s="tk", a="style", id=link["id"]).pack()))
+    check((await db.get_task(link["id"]))["style"] == "success", "цвет кнопки задания переключается")
+    for cb in (A(s="tk"), A(s="tk", a="card", id=sub["id"]), A(s="tk", a="up", id=link["id"]),
+               A(s="tk", a="field", id=sub["id"], v="url")):
+        await feed(cb_update(ADMIN, cb.pack()))
+    check(True, "экраны админки заданий без ошибок")
+
+    await feed(cb_update(user_id, U(a="tasks").pack()))
+    screen = session.screen()
+    buttons = [b for row in screen.reply_markup.inline_keyboard for b in row]
+    check("Доступные задания: 3" in screen.text and buttons[1].text == "🔗 Наш канал с дешёвыми⭐"
+          and buttons[1].style == "success" and buttons[-1].text == "◀️ В меню",
+          "пользователь видит 3 задания (порядок и цвет из админки)")
+    await feed(cb_update(user_id, U(a="task", p=sub["id"]).pack()))
+    check("Подпишись на канал «Private Chan»" in session.screen().text
+          and "https://t.me/+secret" in str(session.screen().reply_markup), "карточка задания со ссылкой «Перейти»")
+
+    session.members.discard((-1002, user_id))
+    await feed(cb_update(user_id, U(a="taskchk", p=sub["id"]).pack()))
+    check(await balance(user_id) == 0, "не подписался — звёзды не начислены")
+    session.members.add((-1002, user_id))
+    await feed(cb_update(user_id, U(a="taskchk", p=sub["id"]).pack()))
+    await feed(cb_update(user_id, U(a="taskchk", p=sub["id"]).pack()))
+    check(await balance(user_id) == 200, "подписался — +2 ⭐, повторная проверка не начисляет второй раз")
+
+    await feed(cb_update(user_id, U(a="taskchk", p=boost["id"]).pack()))
+    check(await balance(user_id) == 200, "без буста — не засчитано")
+    session.boosts.add((boost["chat_id"], user_id))
+    await feed(cb_update(user_id, U(a="taskchk", p=boost["id"]).pack()))
+    check(await balance(user_id) == 350, "буст проверен через getUserChatBoosts — +1.5 ⭐")
+
+    await feed(cb_update(user_id, U(a="task", p=link["id"]).pack()))
+    await feed(cb_update(user_id, U(a="taskchk", p=link["id"]).pack()))
+    check(await balance(user_id) == 350, "ссылка: «Проверить» сразу после открытия не засчитывается")
+    tasks_service = dp["tasks"]
+    tasks_service._opened[(user_id, link["id"])] -= 60
+    await feed(cb_update(user_id, U(a="taskchk", p=link["id"]).pack()))
+    check(await balance(user_id) == 375, "ссылка засчитана через несколько секунд — +0.25 ⭐")
+    await feed(cb_update(user_id, U(a="tasks").pack()))
+    check("Доступные задания: 0" in session.screen().text, "выполненные задания пропадают из списка")
+
+    await db.update_task(sub["id"], max_done=1)
+    await feed(msg_update(701, "/start"))
+    session.members.update({(CHANNEL, 701), (-1002, 701)})
+    await feed(cb_update(701, U(a="check").pack()))
+    await feed(cb_update(701, U(a="tasks").pack()))
+    check("Доступные задания: 2" in session.screen().text, "лимит выполнений исчерпан — задание скрыто")
+    await feed(cb_update(701, U(a="taskchk", p=sub["id"]).pack()))
+    check(await balance(701) == 0, "по старой кнопке задание с исчерпанным лимитом не засчитывается")
+
+    print("Кейсы за звёзды с баланса")
+    await dp["cases"].seed_defaults()
+    await dp["cases"].seed_defaults()
+    daily = (await db.cases())[0]
+    check(len(await db.cases()) == 1 and daily["is_daily"] and daily["price"] == 0
+          and len(await db.case_prizes(daily["id"])) == 4, "создан ежедневный кейс по умолчанию (один раз)")
+    await feed(cb_update(user_id, U(a="cases").pack()))
+    check("МАГАЗИН КЕЙСОВ" in session.screen().text and "Баланс: <b>3.75 Stars</b>" in session.screen().text
+          and "Ежедневный кейс — 0 ⭐" in str(session.screen().reply_markup), "магазин кейсов с балансом 3.75")
+    await feed(cb_update(user_id, U(a="caseopen", p=daily["id"]).pack()))
+    after_daily = await balance(user_id)
+    check(after_daily - 375 in {10, 25, 50, 100} and "Тебе выпало" in session.screen().text,
+          f"ежедневный кейс бесплатно: +{(after_daily - 375) / 100} ⭐ на баланс")
+    await feed(cb_update(user_id, U(a="caseopen", p=daily["id"]).pack()))
+    check(await balance(user_id) == after_daily, "второй раз за сутки ежедневный кейс не открывается")
+    await feed(cb_update(user_id, U(a="case", p=daily["id"]).pack()))
+    check("Следующее открытие через" in session.screen().text, "в карточке — сколько ждать")
+
+    await feed(cb_update(ADMIN, A(s="cs", a="new").pack()))
+    await feed(msg_update(ADMIN, "мини бокс"))
+    await feed(msg_update(ADMIN, "5"))
+    box = (await db.cases())[-1]
+    await feed(cb_update(ADMIN, A(s="cs", a="pick", id=box["id"], v="g_bear").pack()))
+    await feed(msg_update(ADMIN, "100"))
+    check(box["price"] == 500 and [(p["kind"], p["gift_id"], p["value"]) for p in await db.case_prizes(box["id"])]
+          == [("gift", "g_bear", 1500)], "админ создал кейс за 5 ⭐ с мишкой")
+    await feed(cb_update(ADMIN, A(s="cs", a="emoji", id=box["id"]).pack()))
+    await feed(msg_update(ADMIN, "🧸", entities=[{"type": "custom_emoji", "offset": 0, "length": 2,
+                                                   "custom_emoji_id": "5170233102089322756"}]))
+    box = await db.get_case(box["id"])
+    check(box["emoji"] == "🧸" and box["emoji_id"] == "5170233102089322756", "премиум-эмодзи кейса из сообщения")
+    for cb in (A(s="cs"), A(s="cs", a="card", id=box["id"]), A(s="cs", a="style", id=box["id"]),
+               A(s="cs", a="up", id=box["id"]), A(s="cs", a="add", id=box["id"]), A(s="cs", a="addstars", id=box["id"])):
+        await feed(cb_update(ADMIN, cb.pack()))
+    await feed(msg_update(ADMIN, "0.5"))
+    await feed(msg_update(ADMIN, "0"))
+    await feed(msg_update(ADMIN, "1"))
+    await feed(cb_update(ADMIN, A(s="cs", a="prize_del", id=(await db.case_prizes(box["id"]))[-1]["id"]).pack()))
+    check(len(await db.case_prizes(box["id"])) == 1, "приз-звёзды добавлен и убран")
+
+    await feed(cb_update(user_id, U(a="cases").pack()))
+    box_btn = session.screen().reply_markup.inline_keyboard[0][0]  # админ поднял кейс выше
+    case_btn = session.screen().reply_markup.inline_keyboard[1][0]
+    check(case_btn.text == "🎁 Ежедневный кейс — 0 ⭐" and box_btn.text == "мини бокс — 5 ⭐"
+          and box_btn.icon_custom_emoji_id == "5170233102089322756" and box_btn.style == "success",
+          "кнопки кейсов: эмодзи, премиум-иконка, цвет")
+
+    await db.set_balance(user_id, 499)
+    gifts_before = len(session.by_type(SendGift))
+    await feed(cb_update(user_id, U(a="caseopen", p=box["id"]).pack()))
+    check(await balance(user_id) == 499 and len(session.by_type(SendGift)) == gifts_before,
+          "не хватает звёзд — кейс не открылся")
+    await db.set_balance(user_id, 600)
+    await feed(cb_update(user_id, U(a="caseopen", p=box["id"]).pack()))
+    gift = session.by_type(SendGift)[-1]
+    check(await balance(user_id) == 100 and gift.user_id == user_id and gift.gift_id == "g_bear" and gift.text is None,
+          "кейс за 5 ⭐: списано с баланса, мишка отправлен без подписи")
+    check("Подарок уже в твоём профиле" in session.screen().text, "экран выигрыша")
+    stats = (await db.case_stats())[box["id"]]
+    check(stats["opens"] == 1 and stats["spent"] == 500 and stats["gifts"] == 1500, "статистика кейса")
+    await feed(cb_update(ADMIN, A(s="cs", a="toggle", id=box["id"]).pack()))
+    await feed(cb_update(user_id, U(a="caseopen", p=box["id"]).pack()))
+    check(await balance(user_id) == 100, "выключенный кейс не открывается")
+
+    print("Профиль и баланс")
+    await feed(cb_update(user_id, U(a="profile").pack()))
+    check("Баланс: <b>1 Stars</b>" in session.screen().text and "Выполнено заданий: <b>3</b>" in session.screen().text
+          and "Открыто кейсов: <b>2</b>" in session.screen().text, "профиль: баланс, задания, кейсы")
+    await feed(cb_update(ADMIN, A(s="us", a="card", id=user_id).pack()))
+    check("Баланс в боте: <b>1</b>" in session.screen().text, "баланс в карточке пользователя")
+    for raw, expected in (("+2.5", 350), ("-1", 250), ("10", 1000), ("-50", 0), ("abc", 0)):
+        await feed(cb_update(ADMIN, A(s="us", a="bal", id=user_id).pack()))
+        await feed(msg_update(ADMIN, raw))
+    check(await balance(user_id) == 0, "админ меняет баланс: +, −, точное значение, не ниже нуля")
+    for raw in ("+2.5", "-1"):
+        await feed(cb_update(ADMIN, A(s="us", a="bal", id=user_id).pack()))
+        await feed(msg_update(ADMIN, raw))
+    check(await balance(user_id) == 150, "+2.5 и −1 → 1.5 ⭐")
+
+    print("Баннер и раздел «Главное меню»")
+    await feed(cb_update(ADMIN, A(s="mn").pack()))
+    await feed(cb_update(ADMIN, A(s="mn", a="toggle").pack()))
+    check(settings.flag("banner_enabled"), "админ включил баннер")
+    await feed(msg_update(user_id, "/start"))
+    photo = session.by_type(SendPhoto)[-1]
+    check(isinstance(photo.photo, FSInputFile) and str(photo.photo.path).endswith("assets/banner.webp")
+          and "добро пожаловать" in photo.caption and "Заработать звёзды" in str(photo.reply_markup),
+          "/start — меню под баннером banner.webp")
+    file_id, unique_id = settings.get("banner_file_id"), settings.get("banner_unique_id")
+    check(bool(file_id and unique_id), "file_id баннера сохранён — файл загружается один раз")
+    calls = len(session.calls)
+    await feed(photo_cb_update(user_id, U(a="tasks").pack(), unique_id))
+    edit = session.calls[calls]
+    check(isinstance(edit, EditMessageCaption) and "Доступные задания" in edit.caption,
+          "переход по меню — редактируется подпись под тем же баннером")
+    await feed(cb_update(user_id, U(a="cases").pack()))
+    photo = session.by_type(SendPhoto)[-1]
+    check(photo.photo == file_id and "МАГАЗИН КЕЙСОВ" in photo.caption, "текстовое сообщение заменяется баннером")
+    calls = len(session.calls)
+    await feed(photo_cb_update(user_id, U(a="profile").pack(), "other"))
+    check(type(session.calls[calls]).__name__ == "EditMessageMedia", "чужое фото заменяется баннером")
+    calls = len(session.calls)
+    await feed(photo_cb_update(user_id, U(a="refs").pack(), unique_id))
+    check(isinstance(session.calls[calls], EditMessageCaption), "экран «Получить подарки» тоже с баннером")
+    session.members.discard((CHANNEL, user_id))
+    await feed(msg_update(user_id, "/start"))
+    check("Я подписался" in str(session.by_type(SendPhoto)[-1].reply_markup), "экран подписки при старте — с баннером")
+    session.members.add((CHANNEL, user_id))
+
+    await feed(cb_update(ADMIN, A(s="mn", a="banner").pack()))
+    await feed(msg_update(ADMIN, "", photo=[{"file_id": "custom", "file_unique_id": "cu", "width": 1280,
+                                             "height": 720}]))
+    check(settings.get("banner_file_id") == "custom" and settings.flag("banner_custom"), "админ загрузил свой баннер")
+    await feed(cb_update(ADMIN, A(s="mn", a="reset").pack()))
+    check(settings.get("banner_file_id") == "" and not settings.flag("banner_custom"), "возврат к баннеру по умолчанию")
+    await feed(cb_update(ADMIN, A(s="mn", a="url").pack()))
+    await feed(msg_update(ADMIN, "@mygiveaways"))
+    check(settings.get("giveaway_url") == "https://t.me/mygiveaways", "ссылка на канал с раздачами из @username")
+    await feed(cb_update(ADMIN, A(s="home").pack()))
+    check("💰 Задания" in str(session.screen().reply_markup) and "📦 Кейсы" in str(session.screen().reply_markup)
+          and "🏠 Главное меню" in str(session.screen().reply_markup), "новые разделы на дашборде админки")
+    for key in ("text_main", "text_tasks", "text_cases"):
+        await feed(cb_update(ADMIN, A(s="tx", a="card", v=key).pack()))
+    check("12.5" in session.screen().text, "тексты меню, заданий и кейсов редактируются в «Текстах»")
 
 
 if __name__ == "__main__":

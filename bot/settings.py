@@ -56,6 +56,26 @@ DEFAULTS: dict[str, str] = {
         "2️⃣ Жди подарок — админ отправит {gift} прямо тебе в Telegram 🎁"
     ),
 
+    "banner_enabled": "1",         # баннер над каждым экраном меню
+    "banner_file_id": "",          # загруженный баннер (пусто — bot/assets/banner.webp)
+    "banner_unique_id": "",
+    "banner_custom": "0",          # 1 — админ загрузил свой баннер
+    "giveaway_url": "",            # ссылка кнопки «Мой канал с раздачами» (пусто — кнопки нет)
+    "text_main": (
+        "👋 <b>{name}</b>, добро пожаловать!\n\n"
+        "💳 Баланс: <b>{balance} Stars</b>\n\n"
+        "Выполняй задания, открывай кейсы и забирай подарки 🎁"
+    ),
+    "text_tasks": (
+        "💰 <b>Доступные задания: {count}</b>\n"
+        "Выполняйте задания по очереди, чтобы заработать Stars."
+    ),
+    "text_cases": (
+        "📦 <b>МАГАЗИН КЕЙСОВ</b>\n"
+        "💳 Баланс: <b>{balance} Stars</b>\n\n"
+        "Выберите кейс:"
+    ),
+
     "remind_enabled": "1",
     "remind_count": "3",
     "remind_interval": "5",        # минут между напоминаниями (и до первого)
@@ -115,8 +135,13 @@ class TextMeta:
 
 TEXTS: dict[str, TextMeta] = {
     "text_subscribe": TextMeta("Экран подписки", "Первый экран, пока пользователь не подписался", ("name",)),
-    "text_menu": TextMeta("Главное меню", "{progress} — готовый блок с прогресс-баром",
+    "text_main": TextMeta("Главное меню", "Над кнопками главного меню; {balance} — звёзды на балансе в боте",
+                          ("name", "balance")),
+    "text_menu": TextMeta("Получить подарки (друзья)", "{progress} — готовый блок с прогресс-баром",
                           ("name", "goal", "count", "left", "progress")),
+    "text_tasks": TextMeta("Заработать звёзды", "Над кнопками заданий; {count} — сколько заданий доступно",
+                           ("count",)),
+    "text_cases": TextMeta("Магазин кейсов", "Над кнопками кейсов", ("balance",)),
     "text_rules": TextMeta("Как это работает", "Раздел с правилами", ("goal",)),
     "text_share": TextMeta("Текст «Поделиться»", "Подставляется при пересылке ссылки другу", ("goal",)),
     "text_reward_sent": TextMeta("Награда отправлена", "Когда мишка ушёл пользователю", ("name",)),

@@ -1,11 +1,18 @@
 import html
+import logging
+import re
 import time
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
+from typing import Awaitable, Callable, TypeVar
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, LinkPreviewOptions, Message
+
+log = logging.getLogger(__name__)
+T = TypeVar("T")
 
 
 def now() -> int:
@@ -18,6 +25,35 @@ def esc(value: object) -> str:
 
 def fmt_num(n: int) -> str:
     return f"{n:,}".replace(",", " ")
+
+
+def fmt_stars(cents: int) -> str:
+    """Баланс бота хранится в сотых долях звезды: 25 → «0.25», 500 → «5»."""
+    sign = "-" if cents < 0 else ""
+    whole, frac = divmod(abs(cents), 100)
+    return f"{sign}{whole}" + (f".{frac:02d}".rstrip("0") if frac else "")
+
+
+def parse_stars(raw: str, max_value: int = 1_000_000) -> int | None:
+    """«2», «0.25», «0,5 ⭐» → сотые доли звезды; None — не число, больше двух знаков после точки или вне 0…max."""
+    raw = raw.strip().rstrip("⭐ ").replace(",", ".").replace(" ", "")
+    try:
+        value = Decimal(raw)
+    except InvalidOperation:
+        return None
+    if not value.is_finite() or value < 0 or value > max_value or value != value.quantize(Decimal("0.01")):
+        return None
+    return int(value * 100)
+
+
+def fmt_duration(seconds: int) -> str:
+    hours, rest = divmod(max(0, seconds), 3600)
+    minutes = -(-rest // 60)
+    if minutes == 60:
+        hours, minutes = hours + 1, 0
+    if hours and minutes:
+        return f"{hours} ч {minutes} мин"
+    return f"{hours} ч" if hours else f"{max(1, minutes)} мин"
 
 
 def fmt_dt(ts: int | None, tz: ZoneInfo) -> str:
@@ -60,19 +96,67 @@ def render_template(template: str, **values: object) -> str:
     return template
 
 
+def strip_tags(html_text: str) -> str:
+    return html.unescape(re.sub(r"<[^>]+>", "", html_text))
+
+
+# ---------- премиум-эмодзи на кнопках ----------
+
+ICON_FALLBACK: dict[str, str] = {}  # id премиум-эмодзи → обычный эмодзи, если Telegram иконку не примет
+
+
+def icon_text(text: str, icon_id: str | None, fallback: str) -> tuple[str, str | None]:
+    """Текст кнопки и id иконки: с иконкой — без эмодзи в тексте (его заменит иконка)."""
+    if icon_id:
+        ICON_FALLBACK[icon_id] = fallback
+        return text, icon_id
+    return (f"{fallback} {text}" if fallback else text), None
+
+
+def has_icons(kb: InlineKeyboardMarkup | None) -> bool:
+    return kb is not None and any(b.icon_custom_emoji_id for row in kb.inline_keyboard for b in row)
+
+
+def without_icons(kb: InlineKeyboardMarkup) -> InlineKeyboardMarkup:
+    """Клавиатура без премиум-эмодзи: они доступны, только если у владельца бота есть Telegram Premium."""
+    rows = []
+    for row in kb.inline_keyboard:
+        new_row = []
+        for b in row:
+            if b.icon_custom_emoji_id:
+                fallback = ICON_FALLBACK.get(b.icon_custom_emoji_id, "")
+                b = b.model_copy(update={"icon_custom_emoji_id": None,
+                                         "text": f"{fallback} {b.text}" if fallback else b.text})
+            new_row.append(b)
+        rows.append(new_row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def icon_safe(send: Callable[[InlineKeyboardMarkup | None], Awaitable[T]],
+                    kb: InlineKeyboardMarkup | None) -> T:
+    """Отправка с клавиатурой; если Telegram не принял премиум-эмодзи — повтор без них."""
+    try:
+        return await send(kb)
+    except TelegramBadRequest as e:
+        if not has_icons(kb) or "message is not modified" in str(e):
+            raise
+        log.warning("Кнопки с премиум-эмодзи не приняты (%s) — показываю без них", e)
+        return await send(without_icons(kb))
+
+
 async def show(event: Message | CallbackQuery, text: str, kb: InlineKeyboardMarkup | None = None) -> Message | None:
     """Единая точка вывода «экрана»: редактирует сообщение с кнопкой или отправляет новое."""
     if isinstance(event, Message):
-        return await event.answer(text, reply_markup=kb)
+        return await icon_safe(lambda m: event.answer(text, reply_markup=m), kb)
 
     msg = event.message
     if isinstance(msg, Message) and msg.text is not None:
         try:
-            return await msg.edit_text(text, reply_markup=kb)
+            return await icon_safe(lambda m: msg.edit_text(text, reply_markup=m), kb)
         except TelegramBadRequest as e:
             if "message is not modified" in str(e):
                 return msg
-    sent = await event.bot.send_message(event.from_user.id, text, reply_markup=kb)
+    sent = await icon_safe(lambda m: event.bot.send_message(event.from_user.id, text, reply_markup=m), kb)
     if isinstance(msg, Message):
         try:
             await msg.delete()

@@ -7,21 +7,39 @@ from aiogram.types import InlineKeyboardButton as Btn, InlineKeyboardMarkup, Web
 from aiosqlite import Row
 
 from bot.callbacks import A, Shop, ShopBuy, U
+from bot.services.cases import OpenResult, case_button_text, prize_label
 from bot.services.checks import PASSWORD_LOCK, Activation, CheckStatus
 from bot.services.rewards import calc_progress
 from bot.services.shop import ShopItem
+from bot.services.tasks import LINK_DELAY
 from bot.settings import Settings
-from bot.utils import esc, plural, render_template
+from bot.utils import esc, fmt_duration, fmt_stars, icon_text, plural, render_template
 
 Screen = tuple[str, InlineKeyboardMarkup]
+
+# Премиум-эмодзи на кнопках главного меню (нужен Telegram Premium у владельца бота, иначе — обычные эмодзи)
+ICON_GIFTS = "5280519723287610631"
+ICON_EARN = "5967512159033234930"
+ICON_DAILY = "5280789747881512758"
+ICON_SHOP = "5203996991054432397"
+ICON_CHANNEL = "5850654130497916523"
 
 
 def kb(*rows: list[Btn]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[r for r in rows if r])
 
 
+def icon_btn(text: str, icon_id: str | None, fallback: str, **kw) -> Btn:
+    text, icon = icon_text(text, icon_id, fallback)
+    return Btn(text=text, icon_custom_emoji_id=icon, **kw)
+
+
 def back_to_menu() -> list[Btn]:
-    return [Btn(text="« В меню", callback_data=U(a="menu").pack())]
+    return [Btn(text="◀️ В меню", callback_data=U(a="menu").pack())]
+
+
+def back_to_refs() -> list[Btn]:
+    return [Btn(text="◀️ Назад", callback_data=U(a="refs").pack())]
 
 
 def channel_url(ch: Row) -> str | None:
@@ -49,8 +67,31 @@ def subscribe_screen(settings: Settings, name: str, missing: list[Row], for_chec
     return text, kb(*rows)
 
 
-def menu_screen(user: Row, settings: Settings, has_pending_claim: bool, is_admin: bool,
-                has_nft: bool = False, has_shop: bool = False) -> Screen:
+def main_menu_screen(user: Row, settings: Settings, is_admin: bool, has_nft: bool = False,
+                     has_shop: bool = False) -> Screen:
+    text = render_template(settings.get("text_main"), name=esc(user["full_name"]),
+                           balance=fmt_stars(user["balance"]))
+    rows: list[list[Btn]] = [
+        [icon_btn("Получить подарки!", ICON_GIFTS, "🎁", style="success", callback_data=U(a="refs").pack())],
+        [icon_btn("Заработать звёзды", ICON_EARN, "⭐", callback_data=U(a="tasks").pack())],
+        [icon_btn("Ежедневный кейс", ICON_DAILY, "📦", callback_data=U(a="cases").pack())],
+    ]
+    if has_shop:
+        rows.append([icon_btn("Купить подарки", ICON_SHOP, "🛍", callback_data=U(a="shop").pack())])
+    rows.append([Btn(text="👤 Профиль / Баланс", callback_data=U(a="profile").pack())])
+    if url := settings.get("giveaway_url"):
+        rows.append([icon_btn("Мой канал с раздачами", ICON_CHANNEL, "📣", style="primary", url=url)])
+    if has_nft:
+        rows.append([Btn(text="💎 НФТ подарки", style="primary", callback_data=U(a="nft").pack())])
+    if settings.webapp_url and settings.flag("roulette_enabled"):
+        rows.append([Btn(text="🎰 Рулетка подарков", web_app=WebAppInfo(url=settings.webapp_url))])
+    if is_admin:
+        rows.append([Btn(text="🛠 Админ-панель", callback_data=A(s="home").pack())])
+    return text, kb(*rows)
+
+
+def refs_screen(user: Row, settings: Settings, has_pending_claim: bool) -> Screen:
+    """«Получить подарки»: подарок за приглашённых друзей."""
     p = calc_progress(user, settings)
     friends = plural(p.left, "друга", "друзей", "друзей")
 
@@ -79,15 +120,8 @@ def menu_screen(user: Row, settings: Settings, has_pending_claim: bool, is_admin
                      callback_data=U(a="invite").pack())])
     rows.append([Btn(text="👥 Мои друзья", callback_data=U(a="friends").pack()),
                  Btn(text="🏆 Топ", callback_data=U(a="top").pack())])
-    if has_shop:
-        rows.append([Btn(text="🛍 ПОДАРКИ ДЕШЕВЛЕ ЧЕМ В ТГ", style="success", callback_data=U(a="shop").pack())])
-    if has_nft:
-        rows.append([Btn(text="💎 НФТ подарки", style="primary", callback_data=U(a="nft").pack())])
-    if settings.webapp_url and settings.flag("roulette_enabled"):
-        rows.append([Btn(text="🎰 Рулетка подарков", web_app=WebAppInfo(url=settings.webapp_url))])
     rows.append([Btn(text="❓ Как это работает", callback_data=U(a="rules").pack())])
-    if is_admin:
-        rows.append([Btn(text="🛠 Админ-панель", callback_data=A(s="home").pack())])
+    rows.append(back_to_menu())
     return text, kb(*rows)
 
 
@@ -114,7 +148,7 @@ def invite_screen(user: Row, settings: Settings, bot_username: str) -> Screen:
         [Btn(text="📤 Поделиться", style="primary", url=share_url)],
         [Btn(text="📋 Скопировать ссылку", copy_text={"text": link})],
         [Btn(text="👥 Мои друзья", callback_data=U(a="friends").pack())],
-        back_to_menu(),
+        back_to_refs(),
     )
 
 
@@ -149,7 +183,7 @@ def friends_screen(referrals: list[Row], credited: int, pending: int, page: int)
     return "\n".join(lines), kb(
         nav,
         [Btn(text="🔗 Пригласить друзей", style="primary", callback_data=U(a="invite").pack())],
-        back_to_menu(),
+        back_to_refs(),
     )
 
 
@@ -170,7 +204,7 @@ def top_screen(top: list[Row], my_rank: int | None, my_total: int, user_id: int)
                  else "📍 Ты пока не в рейтинге — пригласи первого друга!")
     return "\n".join(lines), kb(
         [Btn(text="🔗 Пригласить друзей", style="primary", callback_data=U(a="invite").pack())],
-        back_to_menu(),
+        back_to_refs(),
     )
 
 
@@ -228,14 +262,13 @@ def nft_button_text(gift: Row) -> str:
     return gift["title"] + (f" · {gift['price']}" if gift["price"] else "")
 
 
-def nft_list_screen(gifts: list[Row], settings: Settings, page: int, icons: bool = True) -> Screen:
-    """icons=False — без премиум-эмодзи (если Telegram их не принял)."""
+def nft_list_screen(gifts: list[Row], settings: Settings, page: int) -> Screen:
     pages = max(1, -(-len(gifts) // NFT_PAGE))
     page = max(0, min(page, pages - 1))
     text = settings.get("text_nft_list")
     if not gifts:
         text += "\n\n<i>Подарков пока нет — загляни чуть позже.</i>"
-    rows = [[Btn(text=nft_button_text(g), icon_custom_emoji_id=g["emoji_id"] if icons else None,
+    rows = [[Btn(text=nft_button_text(g), icon_custom_emoji_id=g["emoji_id"],
                  callback_data=U(a="nftg", p=g["id"]).pack())]
             for g in gifts[page * NFT_PAGE:(page + 1) * NFT_PAGE]]
     if pages > 1:
@@ -314,3 +347,123 @@ def shop_done_screen(emoji: str, name: str, comment: str) -> Screen:
         [Btn(text="🛍 Купить ещё", style="primary", callback_data=U(a="shop").pack())],
         back_to_menu(),
     )
+
+
+# ---------- профиль ----------
+
+def profile_screen(user: Row, tasks_done: int, earned: int, case_opens: int) -> Screen:
+    total = user["ref_count"] + user["bonus_refs"]
+    text = "\n".join([
+        "👤 <b>Профиль</b>\n",
+        f"🆔 ID: <code>{user['user_id']}</code>",
+        f"💳 Баланс: <b>{fmt_stars(user['balance'])} Stars</b>\n",
+        f"✅ Выполнено заданий: <b>{tasks_done}</b> (заработано {fmt_stars(earned)} ⭐)",
+        f"📦 Открыто кейсов: <b>{case_opens}</b>",
+        f"👥 Приглашено друзей: <b>{total}</b>",
+    ])
+    return text, kb(
+        [icon_btn("Заработать звёзды", ICON_EARN, "⭐", style="success", callback_data=U(a="tasks").pack())],
+        [icon_btn("Кейсы", ICON_DAILY, "📦", callback_data=U(a="cases").pack())],
+        back_to_menu(),
+    )
+
+
+# ---------- задания ----------
+
+TASK_HEADERS = {
+    "sub": "📢 <b>Подпишись на канал {chat}</b>",
+    "boost": "🚀 <b>Забусти канал {chat}</b>",
+    "link": "🔗 <b>Перейди по ссылке</b>",
+}
+TASK_STEPS = {
+    "sub": "1️⃣ Нажми «Перейти» и подпишись\n2️⃣ Вернись и нажми «Проверить»",
+    "boost": "1️⃣ Нажми «Перейти» и отдай буст каналу (нужен Telegram Premium)\n"
+             "2️⃣ Вернись и нажми «Проверить»",
+    "link": f"1️⃣ Нажми «Перейти»\n2️⃣ Через {LINK_DELAY} секунд вернись и нажми «Проверить»",
+}
+
+
+def tasks_screen(tasks: list[Row], settings: Settings) -> Screen:
+    text = render_template(settings.get("text_tasks"), count=len(tasks))
+    if not tasks:
+        text += "\n\n<i>Ты выполнил все задания — новые появятся совсем скоро!</i>"
+    rows = [[Btn(text=t["title"], style=t["style"], callback_data=U(a="task", p=t["id"]).pack())] for t in tasks]
+    rows.append(back_to_menu())
+    return text, kb(*rows)
+
+
+def task_screen(task: Row) -> Screen:
+    chat = f"«{esc(task['chat_title'])}»" if task["chat_title"] else ""
+    text = "\n".join([
+        TASK_HEADERS[task["kind"]].format(chat=chat).replace("  ", " "),
+        f"<i>{esc(task['title'])}</i>\n",
+        f"💰 Награда: <b>{fmt_stars(task['reward'])} ⭐</b> на баланс\n",
+        TASK_STEPS[task["kind"]],
+    ])
+    rows = []
+    if task["url"]:
+        rows.append([Btn(text="➡️ Перейти", style="primary", url=task["url"])])
+    rows.append([Btn(text="✅ Проверить", style="success", callback_data=U(a="taskchk", p=task["id"]).pack())])
+    rows.append([Btn(text="◀️ К заданиям", callback_data=U(a="tasks").pack())])
+    return text, kb(*rows)
+
+
+# ---------- кейсы ----------
+
+def cases_screen(cases: list[Row], balance: int, settings: Settings) -> Screen:
+    text = render_template(settings.get("text_cases"), balance=fmt_stars(balance))
+    if not cases:
+        text += "\n\n<i>Кейсов пока нет — загляни чуть позже.</i>"
+    rows = [[icon_btn(case_button_text(c), c["emoji_id"], c["emoji"] or "", style=c["style"],
+                      callback_data=U(a="case", p=c["id"]).pack())] for c in cases]
+    rows.append(back_to_menu())
+    return text, kb(*rows)
+
+
+def fmt_chance(weight: float, total: float) -> str:
+    value = weight / total * 100 if total else 0
+    return f"{value:.2g}%" if value < 1 else f"{value:.1f}".rstrip("0").rstrip(".") + "%"
+
+
+def case_screen(case: Row, prizes: list[Row], balance: int, wait: int) -> Screen:
+    total = sum(p["weight"] for p in prizes)
+    price = fmt_stars(case["price"])
+    lines = [
+        f"{case['emoji'] or '📦'} <b>{esc(case['name'])}</b>\n",
+        f"💰 Цена: <b>{'бесплатно' if not case['price'] else price + ' ⭐'}</b>"
+        + (" · раз в сутки" if case["is_daily"] else ""),
+        f"💳 Твой баланс: <b>{fmt_stars(balance)} ⭐</b>\n",
+        "<b>Что может выпасть:</b>",
+        *(f"{prize_label(p)} — {fmt_chance(p['weight'], total)}" for p in prizes),
+    ]
+    rows = []
+    if wait:
+        lines.append(f"\n⏳ Следующее открытие через <b>{fmt_duration(wait)}</b>")
+        rows.append([Btn(text=f"⏳ Через {fmt_duration(wait)}", callback_data=U(a="case", p=case["id"]).pack())])
+    else:
+        label = f"🎁 Открыть за {price} ⭐" if case["price"] else "🎁 Открыть бесплатно"
+        rows.append([Btn(text=label, style="success", callback_data=U(a="caseopen", p=case["id"]).pack())])
+        if case["price"] > balance:
+            lines.append(f"\n⚠️ Не хватает <b>{fmt_stars(case['price'] - balance)} ⭐</b> — заработай их на заданиях")
+            rows.append([icon_btn("Заработать звёзды", ICON_EARN, "⭐", callback_data=U(a="tasks").pack())])
+    rows.append([Btn(text="◀️ К кейсам", callback_data=U(a="cases").pack())])
+    return "\n".join(lines), kb(*rows)
+
+
+def case_result_screen(case: Row, result: OpenResult, balance: int) -> Screen:
+    prize = result.prize
+    assert prize is not None
+    if prize["kind"] == "stars":
+        lines = [f"🎉 <b>Тебе выпало {fmt_stars(prize['value'])} ⭐!</b>\n", "Звёзды уже на твоём балансе."]
+    else:
+        where = ("Подарок уже в твоём профиле → «Подарки»." if result.delivered == "sent"
+                 else "Подарок отправим в ближайшее время — пришлём уведомление.")
+        lines = [f"🎉 <b>Тебе выпал {prize['emoji'] or '🎁'} подарок за {fmt_stars(prize['value'])} ⭐!</b>\n", where]
+    lines.append(f"\n💳 Баланс: <b>{fmt_stars(balance)} Stars</b>")
+    rows = []
+    if not case["is_daily"] and balance >= case["price"]:
+        rows.append([Btn(text=f"🔁 Открыть ещё за {fmt_stars(case['price'])} ⭐", style="success",
+                         callback_data=U(a="caseopen", p=case["id"]).pack())])
+    rows.append([Btn(text="📦 К кейсам", callback_data=U(a="cases").pack())])
+    rows.append(back_to_menu())
+    return "\n".join(lines), kb(*rows)

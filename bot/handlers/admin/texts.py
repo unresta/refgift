@@ -19,7 +19,7 @@ def sample_values(settings: Settings) -> dict[str, object]:
     goal = settings.goal
     cur = min(3, goal)
     return {
-        "name": "Иван", "goal": goal, "count": cur, "left": goal - cur,
+        "name": "Иван", "goal": goal, "count": cur, "left": goal - cur, "balance": "12.5",
         "progress": f"📊 Твой прогресс: <b>{cur}/{goal}</b>\n{progress_bar(cur, goal)} "
                     f"{round(cur * 100 / goal)}%\nОсталось пригласить: <b>{goal - cur}</b>",
     }

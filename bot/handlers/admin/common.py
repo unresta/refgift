@@ -79,6 +79,19 @@ class Input(StatesGroup):
     shop_name = State()
     shop_comment = State()
     shop_comment_add = State()
+    tk_channel = State()
+    tk_url = State()
+    tk_reward = State()
+    tk_title = State()
+    tk_field = State()
+    cs_name = State()
+    cs_price = State()
+    cs_emoji = State()
+    cs_stars = State()
+    cs_weight = State()
+    mn_banner = State()
+    mn_url = State()
+    user_balance = State()
 
 
 def btn(text: str, s: str, a: str = "open", id: int = 0, p: int = 0, v: str = "",

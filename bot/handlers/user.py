@@ -2,7 +2,7 @@ import logging
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -15,19 +15,23 @@ from aiosqlite import Row
 from bot.callbacks import A, Shop, ShopBuy, U
 from bot.database import Database
 from bot.services.admins import AdminRegistry
+from bot.services.banner import Banner
+from bot.services.cases import CaseService, OpenStatus
 from bot.services.checks import CHECK_PREFIX, PASSWORD_MAX, CheckService, CheckStatus
 from bot.services.reminders import ReminderService
 from bot.services.rewards import ClaimResult, RewardService
 from bot.services.roulette import SPIN_PREFIX, RouletteService
 from bot.services.shop import PREFIX as SHOP_PREFIX, PayResult, ShopService
 from bot.services.subscription import SubscriptionService
+from bot.services.tasks import TaskCheck, TaskService
 from bot.services.userbot import Userbot
 from bot.settings import Settings
-from bot.utils import esc, render_template, show, show_card
-from bot.views import (FRIENDS_PAGE, activation_screen, back_to_menu, friends_screen, invite_screen, kb, menu_screen,
-                       nft_card_screen, nft_contact_base, nft_list_screen, plain, shop_comments_screen,
-                       shop_done_screen, shop_item_screen, shop_screen,
-                       subscribe_screen, top_screen)
+from bot.utils import esc, fmt_duration, fmt_stars, render_template, show_card
+from bot.views import (FRIENDS_PAGE, activation_screen, back_to_menu, back_to_refs, case_result_screen, case_screen,
+                       cases_screen, friends_screen, invite_screen, kb, main_menu_screen, nft_card_screen,
+                       nft_contact_base, nft_list_screen, plain, profile_screen, refs_screen, shop_comments_screen,
+                       shop_done_screen, shop_item_screen, shop_screen, subscribe_screen, task_screen, tasks_screen,
+                       top_screen)
 
 log = logging.getLogger(__name__)
 
@@ -45,7 +49,8 @@ class CheckInput(StatesGroup):
     password = State()  # ждём пароль от чека; в data — его код
 
 
-async def show_activation(event: Message | CallbackQuery, act, settings: Settings, state: FSMContext | None) -> None:
+async def show_activation(event: Message | CallbackQuery, act, settings: Settings, banner: Banner,
+                          state: FSMContext | None) -> None:
     """Экран результата активации; для чека с паролем — переводит в ввод пароля."""
     if state is not None:
         if act.status in (CheckStatus.NEED_PASSWORD, CheckStatus.WRONG_PASSWORD):
@@ -53,21 +58,27 @@ async def show_activation(event: Message | CallbackQuery, act, settings: Setting
             await state.update_data(code=act.check["code"])
         elif await state.get_state() == CheckInput.password.state:
             await state.clear()
-    await show(event, *activation_screen(act, settings))
+    await banner.show(event, *activation_screen(act, settings))
 
 
 async def open_menu(event: Message | CallbackQuery, user_id: int, db: Database, settings: Settings,
-                    is_admin: bool) -> None:
+                    banner: Banner, is_admin: bool) -> None:
+    user = await db.get_user(user_id)
+    assert user is not None
+    has_nft = settings.flag("nft_enabled") and await db.count_nft_gifts(only_active=True) > 0
+    await banner.show(event, *main_menu_screen(user, settings, is_admin, has_nft, settings.flag("shop_enabled")))
+
+
+async def open_refs(event: Message | CallbackQuery, user_id: int, db: Database, settings: Settings,
+                    banner: Banner) -> None:
     user = await db.get_user(user_id)
     assert user is not None
     pending = await db.user_pending_claim(user_id)
-    has_nft = settings.flag("nft_enabled") and await db.count_nft_gifts(only_active=True) > 0
-    await show(event, *menu_screen(user, settings, pending is not None, is_admin, has_nft,
-                                   settings.flag("shop_enabled")))
+    await banner.show(event, *refs_screen(user, settings, pending is not None))
 
 
 async def pass_gate(event: Message | CallbackQuery, user_id: int, db: Database, settings: Settings,
-                    subs: SubscriptionService, rewards: RewardService, checks: CheckService,
+                    subs: SubscriptionService, rewards: RewardService, checks: CheckService, banner: Banner,
                     is_admin: bool, state: FSMContext | None = None) -> list[Row]:
     """Проверяет подписку без кэша. Нет подписки — экран подписки; есть — активируем ждущий чек или открываем меню.
 
@@ -78,25 +89,25 @@ async def pass_gate(event: Message | CallbackQuery, user_id: int, db: Database, 
     if user["pending_check"]:
         act = await checks.activate(user_id, user["pending_check"])  # внутри — своя проверка подписки
         if act.status is CheckStatus.NEED_SUB:
-            await show(event, *subscribe_screen(settings, user["full_name"], act.missing,
-                                                for_check=act.available))
+            await banner.show(event, *subscribe_screen(settings, user["full_name"], act.missing,
+                                                       for_check=act.available))
             return act.missing
-        await show_activation(event, act, settings, state)
+        await show_activation(event, act, settings, banner, state)
         return []
 
     missing = await subs.missing(user_id, use_cache=False)
     if missing:
-        await show(event, *subscribe_screen(settings, user["full_name"], missing))
+        await banner.show(event, *subscribe_screen(settings, user["full_name"], missing))
         return missing
     await rewards.complete_verification(user_id)
-    await open_menu(event, user_id, db, settings, is_admin)
+    await open_menu(event, user_id, db, settings, banner, is_admin)
     return []
 
 
 @router.message(CommandStart(), flags={"skip_sub": True})
 async def cmd_start(message: Message, command: CommandObject, user: Row, is_new: bool, db: Database,
                     settings: Settings, subs: SubscriptionService, rewards: RewardService, checks: CheckService,
-                    reminders: ReminderService, is_admin: bool, state: FSMContext) -> None:
+                    reminders: ReminderService, banner: Banner, is_admin: bool, state: FSMContext) -> None:
     await state.clear()
     args = (command.args or "").strip()
     if args.startswith(CHECK_PREFIX):
@@ -113,7 +124,7 @@ async def cmd_start(message: Message, command: CommandObject, user: Row, is_new:
         referrer_id = int(args[1:])
         if referrer_id != user["user_id"] and await db.get_user(referrer_id):
             await db.set_referrer(user["user_id"], referrer_id)
-    missing = await pass_gate(message, user["user_id"], db, settings, subs, rewards, checks, is_admin, state)
+    missing = await pass_gate(message, user["user_id"], db, settings, subs, rewards, checks, banner, is_admin, state)
     if missing:
         await reminders.on_start(await db.get_user(user["user_id"]))
 
@@ -121,9 +132,9 @@ async def cmd_start(message: Message, command: CommandObject, user: Row, is_new:
 @router.callback_query(U.filter(F.a == "gift_cta"), flags={"skip_sub": True})
 async def gift_cta(call: CallbackQuery, callback_answer: CallbackAnswer, user: Row, db: Database,
                    settings: Settings, subs: SubscriptionService, rewards: RewardService, checks: CheckService,
-                   is_admin: bool, state: FSMContext) -> None:
+                   banner: Banner, is_admin: bool, state: FSMContext) -> None:
     """Кнопка из напоминания: ведёт на обязательную подписку (или в меню, если уже подписан)."""
-    missing = await pass_gate(call, user["user_id"], db, settings, subs, rewards, checks, is_admin, state)
+    missing = await pass_gate(call, user["user_id"], db, settings, subs, rewards, checks, banner, is_admin, state)
     callback_answer.text = ("📢 Подпишись на каналы — и подарок твой!" if missing
                             else "✅ Подписка уже есть — забирай подарок в меню")
 
@@ -131,8 +142,8 @@ async def gift_cta(call: CallbackQuery, callback_answer: CallbackAnswer, user: R
 @router.callback_query(U.filter(F.a == "check"), flags={"skip_sub": True})
 async def check_subscription(call: CallbackQuery, callback_answer: CallbackAnswer, user: Row, db: Database,
                              settings: Settings, subs: SubscriptionService, rewards: RewardService,
-                             checks: CheckService, is_admin: bool, state: FSMContext) -> None:
-    missing = await pass_gate(call, user["user_id"], db, settings, subs, rewards, checks, is_admin, state)
+                             checks: CheckService, banner: Banner, is_admin: bool, state: FSMContext) -> None:
+    missing = await pass_gate(call, user["user_id"], db, settings, subs, rewards, checks, banner, is_admin, state)
     if missing:
         names = ", ".join(ch["title"] for ch in missing)
         callback_answer.text = f"❌ Ты ещё не подписан: {names}"[:200]
@@ -142,140 +153,261 @@ async def check_subscription(call: CallbackQuery, callback_answer: CallbackAnswe
 
 
 @router.callback_query(U.filter(F.a == "menu"))
-async def cb_menu(call: CallbackQuery, user: Row, db: Database, settings: Settings, is_admin: bool) -> None:
-    await open_menu(call, user["user_id"], db, settings, is_admin)
+async def cb_menu(call: CallbackQuery, user: Row, db: Database, settings: Settings, banner: Banner,
+                  is_admin: bool) -> None:
+    await open_menu(call, user["user_id"], db, settings, banner, is_admin)
+
+
+# ---------- «Получить подарки»: награда за друзей ----------
+
+@router.callback_query(U.filter(F.a == "refs"))
+async def cb_refs(call: CallbackQuery, user: Row, db: Database, settings: Settings, banner: Banner) -> None:
+    await open_refs(call, user["user_id"], db, settings, banner)
 
 
 @router.callback_query(U.filter(F.a == "invite"))
-async def cb_invite(call: CallbackQuery, user: Row, settings: Settings, bot_username: str) -> None:
-    await show(call, *invite_screen(user, settings, bot_username))
+async def cb_invite(call: CallbackQuery, user: Row, settings: Settings, banner: Banner, bot_username: str) -> None:
+    await banner.show(call, *invite_screen(user, settings, bot_username))
 
 
 @router.callback_query(U.filter(F.a == "friends"))
-async def cb_friends(call: CallbackQuery, callback_data: U, user: Row, db: Database) -> None:
+async def cb_friends(call: CallbackQuery, callback_data: U, user: Row, db: Database, banner: Banner) -> None:
     credited, pending = await db.referral_counts(user["user_id"])
     pages = max(1, -(-(credited + pending) // FRIENDS_PAGE))
     page = max(0, min(callback_data.p, pages - 1))
     referrals = await db.list_referrals(user["user_id"], FRIENDS_PAGE, page * FRIENDS_PAGE)
-    await show(call, *friends_screen(referrals, credited, pending, page))
+    await banner.show(call, *friends_screen(referrals, credited, pending, page))
 
 
 @router.callback_query(U.filter(F.a == "top"))
-async def cb_top(call: CallbackQuery, user: Row, db: Database) -> None:
+async def cb_top(call: CallbackQuery, user: Row, db: Database, banner: Banner) -> None:
     top = await db.top_referrers(10)
     rank = await db.user_rank(user["user_id"])
-    await show(call, *top_screen(top, rank, user["ref_count"] + user["bonus_refs"], user["user_id"]))
+    await banner.show(call, *top_screen(top, rank, user["ref_count"] + user["bonus_refs"], user["user_id"]))
 
 
 @router.callback_query(U.filter(F.a == "rules"))
-async def cb_rules(call: CallbackQuery, settings: Settings) -> None:
+async def cb_rules(call: CallbackQuery, settings: Settings, banner: Banner) -> None:
     text = render_template(settings.get("text_rules"), goal=settings.goal)
-    await show(call, text, kb(
+    await banner.show(call, text, kb(
         [Btn(text="🔗 Пригласить друзей", style="primary", callback_data=U(a="invite").pack())],
-        back_to_menu(),
+        back_to_refs(),
     ))
 
 
 @router.callback_query(U.filter(F.a == "claim"))
 async def cb_claim(call: CallbackQuery, callback_answer: CallbackAnswer, user: Row, db: Database,
-                   settings: Settings, rewards: RewardService, is_admin: bool) -> None:
+                   settings: Settings, rewards: RewardService, banner: Banner) -> None:
     result = await rewards.claim(user)
     if result is ClaimResult.UNAVAILABLE:
         callback_answer.text = "Награда пока недоступна — пригласи ещё друзей 🙌"
         callback_answer.show_alert = True
-        await open_menu(call, user["user_id"], db, settings, is_admin)
+        await open_refs(call, user["user_id"], db, settings, banner)
         return
 
     key = "text_reward_sent" if result is ClaimResult.SENT else "text_reward_pending"
     text = render_template(settings.get(key), name=esc(user["full_name"]))
     callback_answer.text = "🎉 Готово!"
-    await show(call, text, kb(back_to_menu()))
+    await banner.show(call, text, kb(back_to_menu()))
 
 
-async def show_nft_list(call: CallbackQuery, db: Database, settings: Settings, page: int) -> None:
-    gifts = await db.nft_gifts(only_active=True)
-    try:
-        await show(call, *nft_list_screen(gifts, settings, page))
-    except TelegramBadRequest as e:
-        if not any(g["emoji_id"] for g in gifts):
-            raise
-        # премиум-эмодзи на кнопках доступны, только если у владельца бота есть Telegram Premium
-        log.warning("Кнопки с премиум-эмодзи не приняты (%s) — показываю без них", e)
-        await show(call, *nft_list_screen(gifts, settings, page, icons=False))
+# ---------- профиль ----------
+
+@router.callback_query(U.filter(F.a == "profile"))
+async def cb_profile(call: CallbackQuery, user: Row, db: Database, banner: Banner) -> None:
+    done, earned = await db.user_task_stats(user["user_id"])
+    await banner.show(call, *profile_screen(user, done, earned, await db.user_case_opens(user["user_id"])))
+
+
+# ---------- «Заработать звёзды»: задания ----------
+
+async def show_tasks(call: CallbackQuery, user_id: int, db: Database, settings: Settings, banner: Banner) -> None:
+    await banner.show(call, *tasks_screen(await db.available_tasks(user_id), settings))
+
+
+@router.callback_query(U.filter(F.a == "tasks"))
+async def cb_tasks(call: CallbackQuery, user: Row, db: Database, settings: Settings, banner: Banner) -> None:
+    await show_tasks(call, user["user_id"], db, settings, banner)
+
+
+@router.callback_query(U.filter(F.a == "task"))
+async def cb_task(call: CallbackQuery, callback_data: U, callback_answer: CallbackAnswer, user: Row, db: Database,
+                  settings: Settings, tasks: TaskService, banner: Banner) -> None:
+    task = await db.get_task(callback_data.p)
+    if task is None or task["id"] not in {t["id"] for t in await db.available_tasks(user["user_id"])}:
+        callback_answer.text = "Это задание уже недоступно"
+        await show_tasks(call, user["user_id"], db, settings, banner)
+        return
+    if task["kind"] == "link":
+        tasks.opened(user["user_id"], task["id"])
+    await banner.show(call, *task_screen(task))
+
+
+TASK_ALERTS = {
+    TaskCheck.NOT_DONE: {"sub": "❌ Ты ещё не подписан на канал", "boost": "❌ Буст каналу ещё не отдан"},
+    TaskCheck.TOO_EARLY: "⏳ Сначала перейди по ссылке, а через несколько секунд нажми «Проверить»",
+    TaskCheck.ERROR: "⚠️ Не получилось проверить — попробуй чуть позже",
+    TaskCheck.GONE: "Это задание уже недоступно",
+}
+
+
+@router.callback_query(U.filter(F.a == "taskchk"))
+async def cb_task_check(call: CallbackQuery, callback_data: U, callback_answer: CallbackAnswer, user: Row,
+                        db: Database, settings: Settings, tasks: TaskService, banner: Banner) -> None:
+    task = await db.get_task(callback_data.p)
+    result = await tasks.check(task, user["user_id"]) if task else TaskCheck.GONE
+    if result is TaskCheck.DONE:
+        balance = (await db.get_user(user["user_id"]))["balance"]
+        callback_answer.text = (f"✅ Задание выполнено! +{fmt_stars(task['reward'])} ⭐\n"
+                                f"Баланс: {fmt_stars(balance)} ⭐")
+        callback_answer.show_alert = True
+        await show_tasks(call, user["user_id"], db, settings, banner)
+        return
+    alert = TASK_ALERTS[result]
+    callback_answer.text = alert[task["kind"]] if isinstance(alert, dict) else alert
+    callback_answer.show_alert = True
+    if result is TaskCheck.GONE:
+        await show_tasks(call, user["user_id"], db, settings, banner)
+
+
+# ---------- кейсы ----------
+
+async def show_cases(call: CallbackQuery, user_id: int, db: Database, settings: Settings, cases: CaseService,
+                     banner: Banner) -> None:
+    balance = (await db.get_user(user_id))["balance"]
+    await banner.show(call, *cases_screen(await cases.visible(), balance, settings))
+
+
+@router.callback_query(U.filter(F.a == "cases"))
+async def cb_cases(call: CallbackQuery, user: Row, db: Database, settings: Settings, cases: CaseService,
+                   banner: Banner) -> None:
+    await show_cases(call, user["user_id"], db, settings, cases, banner)
+
+
+@router.callback_query(U.filter(F.a == "case"))
+async def cb_case(call: CallbackQuery, callback_data: U, callback_answer: CallbackAnswer, user: Row, db: Database,
+                  settings: Settings, cases: CaseService, banner: Banner) -> None:
+    case = await db.get_case(callback_data.p)
+    prizes = await db.case_prizes(callback_data.p) if case and case["is_active"] else []
+    if not prizes:
+        callback_answer.text = "Этот кейс сейчас недоступен"
+        await show_cases(call, user["user_id"], db, settings, cases, banner)
+        return
+    await banner.show(call, *case_screen(case, prizes, user["balance"], await cases.wait_left(case, user["user_id"])))
+
+
+@router.callback_query(U.filter(F.a == "caseopen"))
+async def cb_case_open(call: CallbackQuery, callback_data: U, callback_answer: CallbackAnswer, user: Row,
+                       db: Database, settings: Settings, cases: CaseService, banner: Banner) -> None:
+    result = await cases.open(user, callback_data.p)
+    if result.status is OpenStatus.BUSY:
+        callback_answer.text = "⏳ Кейс уже открывается…"
+        return
+    if result.status is OpenStatus.UNAVAILABLE:
+        callback_answer.text = "Этот кейс сейчас недоступен"
+        await show_cases(call, user["user_id"], db, settings, cases, banner)
+        return
+    case = await db.get_case(callback_data.p)
+    if result.status is OpenStatus.COOLDOWN:
+        callback_answer.text = f"⏳ Следующее открытие через {fmt_duration(result.wait)}"
+        callback_answer.show_alert = True
+    elif result.status is OpenStatus.NO_FUNDS:
+        need = case["price"] - user["balance"]
+        callback_answer.text = (f"💳 Не хватает {fmt_stars(max(need, 1))} ⭐\n"
+                                "Выполни задания в разделе «Заработать звёзды» — и возвращайся!")
+        callback_answer.show_alert = True
+    balance = (await db.get_user(user["user_id"]))["balance"]
+    if result.status is not OpenStatus.OK:
+        await banner.show(call, *case_screen(case, await db.case_prizes(case["id"]), balance,
+                                             await cases.wait_left(case, user["user_id"])))
+        return
+    callback_answer.text = "🎉 Кейс открыт!"
+    await banner.show(call, *case_result_screen(case, result, balance))
+
+
+# ---------- НФТ подарки ----------
+
+async def show_nft_list(call: CallbackQuery, db: Database, settings: Settings, banner: Banner, page: int) -> None:
+    await banner.show(call, *nft_list_screen(await db.nft_gifts(only_active=True), settings, page))
 
 
 @router.callback_query(U.filter(F.a == "nft"))
 async def cb_nft(call: CallbackQuery, callback_data: U, callback_answer: CallbackAnswer, user: Row, db: Database,
-                 settings: Settings, is_admin: bool) -> None:
+                 settings: Settings, banner: Banner, is_admin: bool) -> None:
     if not settings.flag("nft_enabled"):
         callback_answer.text = "Раздел сейчас недоступен"
-        await open_menu(call, user["user_id"], db, settings, is_admin)
+        await open_menu(call, user["user_id"], db, settings, banner, is_admin)
         return
-    await show_nft_list(call, db, settings, callback_data.p)
+    await show_nft_list(call, db, settings, banner, callback_data.p)
 
 
 @router.callback_query(U.filter(F.a == "nftg"))
 async def cb_nft_gift(call: CallbackQuery, callback_data: U, callback_answer: CallbackAnswer, user: Row,
-                      db: Database, settings: Settings, userbot: Userbot, is_admin: bool) -> None:
+                      db: Database, settings: Settings, userbot: Userbot, banner: Banner, is_admin: bool) -> None:
     if not settings.flag("nft_enabled"):
         callback_answer.text = "Раздел сейчас недоступен"
-        await open_menu(call, user["user_id"], db, settings, is_admin)
+        await open_menu(call, user["user_id"], db, settings, banner, is_admin)
         return
     gift = await db.get_nft_gift(callback_data.p)
     if gift is None or not gift["is_active"]:
         callback_answer.text = "Этот подарок больше недоступен"
-        await show_nft_list(call, db, settings, 0)
+        await show_nft_list(call, db, settings, banner, 0)
         return
     await db.nft_gift_viewed(gift["id"])
     text, markup = nft_card_screen(gift, settings, nft_contact_base(settings, userbot.username))
-    await show_card(call, text, markup, photo=gift["photo"], preview_url=gift["link"])
+    if gift["photo"] or gift["link"]:
+        await show_card(call, text, markup, photo=gift["photo"], preview_url=gift["link"])
+    else:
+        await banner.show(call, text, markup)
 
+
+# ---------- магазин подарков ----------
 
 @router.callback_query(U.filter(F.a == "shop"))
 async def cb_shop(call: CallbackQuery, callback_answer: CallbackAnswer, user: Row, db: Database, settings: Settings,
-                  shop: ShopService, is_admin: bool) -> None:
+                  shop: ShopService, banner: Banner, is_admin: bool) -> None:
     if not settings.flag("shop_enabled"):
         callback_answer.text = "Магазин сейчас закрыт"
-        await open_menu(call, user["user_id"], db, settings, is_admin)
+        await open_menu(call, user["user_id"], db, settings, banner, is_admin)
         return
-    await show(call, *shop_screen(await shop.items(only_active=True), settings))
+    await banner.show(call, *shop_screen(await shop.items(only_active=True), settings))
 
 
 async def shop_item_or_list(call: CallbackQuery, callback_answer: CallbackAnswer, gift_id: str,
-                            settings: Settings, shop: ShopService):
+                            settings: Settings, shop: ShopService, banner: Banner):
     """Подарок из магазина; если он больше не продаётся — показывает список и возвращает None."""
     item = await shop.item(gift_id)
     if settings.flag("shop_enabled") and item is not None and item.active:
         return item
     callback_answer.text = "Этот подарок больше не продаётся"
-    await show(call, *shop_screen(await shop.items(only_active=True), settings))
+    await banner.show(call, *shop_screen(await shop.items(only_active=True), settings))
     return None
 
 
 @router.callback_query(Shop.filter())
 async def cb_shop_item(call: CallbackQuery, callback_data: Shop, callback_answer: CallbackAnswer, db: Database,
-                       settings: Settings, shop: ShopService) -> None:
-    if item := await shop_item_or_list(call, callback_answer, callback_data.g, settings, shop):
-        await show(call, *shop_item_screen(item, shop.default_comment(), bool(await db.shop_comments())))
+                       settings: Settings, shop: ShopService, banner: Banner) -> None:
+    if item := await shop_item_or_list(call, callback_answer, callback_data.g, settings, shop, banner):
+        await banner.show(call, *shop_item_screen(item, shop.default_comment(), bool(await db.shop_comments())))
 
 
 @router.callback_query(ShopBuy.filter())
 async def cb_buy(call: CallbackQuery, callback_data: ShopBuy, callback_answer: CallbackAnswer, db: Database,
-                 settings: Settings, shop: ShopService) -> None:
-    item = await shop_item_or_list(call, callback_answer, callback_data.g, settings, shop)
+                 settings: Settings, shop: ShopService, banner: Banner) -> None:
+    item = await shop_item_or_list(call, callback_answer, callback_data.g, settings, shop, banner)
     if item is None:
         return
     comments = await db.shop_comments()
     if callback_data.c < 0:
         if comments:
-            await show(call, *shop_comments_screen(item, comments))
+            await banner.show(call, *shop_comments_screen(item, comments))
         else:
-            await show(call, *shop_item_screen(item, shop.default_comment(), False))
+            await banner.show(call, *shop_item_screen(item, shop.default_comment(), False))
         return
     comment = await shop.comment_text(callback_data.c)
     if comment is None:
         callback_answer.text = "Этот вариант больше недоступен — выбери другой"
-        await show(call, *shop_item_screen(item, shop.default_comment(), bool(comments)))
+        await banner.show(call, *shop_item_screen(item, shop.default_comment(), bool(comments)))
         return
     price = shop.price_for(item, callback_data.c)
     try:
@@ -301,27 +433,29 @@ async def cb_noop(call: CallbackQuery) -> None:
 
 @router.message(CheckInput.password, F.text, ~F.text.startswith("/"))
 async def on_check_password(message: Message, state: FSMContext, user: Row, settings: Settings,
-                            checks: CheckService) -> None:
+                            checks: CheckService, banner: Banner) -> None:
     code = (await state.get_data()).get("code", "")
     act = await checks.activate(user["user_id"], code, password=message.text[:PASSWORD_MAX])
     if act.status is CheckStatus.NEED_SUB:  # отписался, пока вводил пароль
         await state.clear()
-        await show(message, *subscribe_screen(settings, user["full_name"], act.missing, for_check=act.available))
+        await banner.show(message, *subscribe_screen(settings, user["full_name"], act.missing,
+                                                     for_check=act.available))
         return
-    await show_activation(message, act, settings, state)
+    await show_activation(message, act, settings, banner, state)
 
 
 @router.message()
-async def fallback(message: Message, user: Row, db: Database, settings: Settings, is_admin: bool) -> None:
+async def fallback(message: Message, user: Row, db: Database, settings: Settings, banner: Banner,
+                   is_admin: bool) -> None:
     """Любое непонятное сообщение — просто показываем меню."""
-    await open_menu(message, user["user_id"], db, settings, is_admin)
+    await open_menu(message, user["user_id"], db, settings, banner, is_admin)
 
 
 # ---------- служебные апдейты ----------
 
 @service_router.chat_join_request()
 async def on_join_request(request: ChatJoinRequest, db: Database, subs: SubscriptionService) -> None:
-    if await db.get_channel(request.chat.id):
+    if await db.get_channel(request.chat.id) or await db.is_task_chat(request.chat.id):
         await db.add_join_request(request.chat.id, request.from_user.id)
         subs.reset_cache(request.from_user.id)
 

@@ -5,7 +5,6 @@ from aiogram import BaseMiddleware
 from aiogram.dispatcher.flags import get_flag
 from aiogram.types import CallbackQuery, Message, TelegramObject, User
 
-from bot.utils import show
 from bot.views import subscribe_screen
 
 Handler = Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]]
@@ -82,7 +81,7 @@ class SubscriptionGate(BaseMiddleware):
             answer = data.get("callback_answer")
             if answer is not None:
                 answer.text = "📢 Сначала подпишись на каналы"
-        await show(event, text, kb)
+        await data["banner"].show(event, text, kb)
         return None
 
 

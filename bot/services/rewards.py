@@ -147,16 +147,20 @@ class RewardService:
         return await self.grant(user)
 
     async def grant(self, user: Row, check_id: int | None = None, origin: str | None = None,
-                    gift_id: str | None = None, spin_id: int | None = None, auto: bool | None = None) -> ClaimResult:
+                    gift_id: str | None = None, spin_id: int | None = None, auto: bool | None = None,
+                    with_text: bool | None = None) -> ClaimResult:
         """Выдаёт подарок: автоматически за звёзды или заявкой админам (ручной режим / ошибка отправки).
 
         auto=True — всегда пробовать автоотправку (оплаченные прокрутки рулетки), независимо от режима выдачи.
+        with_text — с подписью из настроек (по умолчанию — всё, кроме выигрышей рулетки).
         """
         user_id = user["user_id"]
         gift_id = gift_id or self.settings.get("gift_id")
+        if with_text is None:
+            with_text = spin_id is None
         error: str | None = None
         if auto or (auto is None and self.settings.get("reward_mode") == "auto"):
-            error = await self.send_gift(user_id, gift_id, with_text=spin_id is None)
+            error = await self.send_gift(user_id, gift_id, with_text=with_text)
             if error is None:
                 await self.db.create_claim(user_id, "sent", "auto", gift_id, check_id=check_id, spin_id=spin_id)
                 return ClaimResult.SENT
