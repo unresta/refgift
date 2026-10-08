@@ -8,7 +8,8 @@ from aiogram.utils.callback_answer import CallbackAnswer
 from bot.callbacks import A
 from bot.handlers.admin.common import Input, back, btn, drop_prompt, kb, prompt
 from bot.settings import TEXTS, Settings
-from bot.utils import progress_bar, render_template, show
+from bot.services.banner import CAPTION_LIMIT
+from bot.utils import progress_bar, render_template, show, strip_tags
 
 router = Router(name="admin_texts")
 
@@ -94,6 +95,10 @@ async def on_text(message: Message, state: FSMContext, settings: Settings) -> No
     await drop_prompt(message, state)
     await state.clear()
     await settings.set(key, html)
+    length = len(strip_tags(render_template(html, **sample_values(settings))))
+    if length > CAPTION_LIMIT:
+        await message.answer(f"⚠️ Текст длиннее {CAPTION_LIMIT} символов ({length}) — Telegram не даёт такую подпись "
+                             "под картинкой, поэтому этот экран покажется без баннера.")
     if unknown:
         await message.answer("⚠️ Неизвестные переменные останутся как есть: "
                              + ", ".join(f"<code>{{{u}}}</code>" for u in unknown))

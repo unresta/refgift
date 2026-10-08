@@ -32,6 +32,8 @@ def menu_screen(settings: Settings):
     ]
     if custom:
         rows.append([btn("↩️ Баннер по умолчанию", "mn", "reset")])
+    rows.append([btn("📝 Текст главного меню", "tx", "edit", v="text_main"),
+                 btn("📝 Текст подписки", "tx", "edit", v="text_subscribe")])
     rows.append([btn("📣 Ссылка на канал с раздачами", "mn", "url", style="primary")])
     rows.append([Btn(text="👀 Как видит пользователь", callback_data=U(a="menu").pack())])
     rows.append(back())

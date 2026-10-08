@@ -1749,6 +1749,31 @@ async def tasks_and_cases(dp, db, bot, session) -> None:
     await feed(cb_update(ADMIN, A(s="home").pack()))
     check("💰 Задания" in str(session.screen().reply_markup) and "📦 Кейсы" in str(session.screen().reply_markup)
           and "🏠 Главное меню" in str(session.screen().reply_markup), "новые разделы на дашборде админки")
+    await feed(cb_update(ADMIN, A(s="mn").pack()))
+    check("Текст главного меню" in str(session.screen().reply_markup)
+          and "Текст подписки" in str(session.screen().reply_markup), "в «Главном меню» админки — кнопки текстов")
+    for key, text, extra in (("text_main", "🔥 Привет, {name}! Баланс {balance}", " жирно"),
+                             ("text_subscribe", "🔥 Подпишись, {name}", " обязательно")):
+        await feed(cb_update(ADMIN, A(s="tx", a="edit", v=key).pack()))
+        full = text + extra
+        await feed(msg_update(ADMIN, full, entities=[
+            {"type": "custom_emoji", "offset": 0, "length": 2, "custom_emoji_id": "5367"},
+            {"type": "bold", "offset": len(text.encode("utf-16-le")) // 2 + 1, "length": len(extra) - 1}]))
+    check(settings.get("text_main").startswith('<tg-emoji emoji-id="5367">🔥</tg-emoji> Привет, {name}')
+          and settings.get("text_main").endswith("<b>жирно</b>"), "текст главного меню сохранён с премиум-эмодзи и жирным")
+    await feed(cb_update(user_id, U(a="menu").pack()))
+    caption = session.by_type(SendPhoto)[-1].caption
+    check('<tg-emoji emoji-id="5367">' in caption and "Привет, User700! Баланс 1.5" in caption,
+          "пользователь видит новый текст меню с подстановками")
+    session.members.discard((CHANNEL, user_id))
+    await feed(msg_update(user_id, "/start"))
+    check("Подпишись, User700 <b>обязательно</b>" in session.by_type(SendPhoto)[-1].caption,
+          "новый текст экрана подписки")
+    session.members.add((CHANNEL, user_id))
+    await feed(cb_update(ADMIN, A(s="tx", a="edit", v="text_main").pack()))
+    await feed(msg_update(ADMIN, "я" * 1100))
+    check("покажется без баннера" in session.texts_to(ADMIN)[-3], "длинный текст — предупреждение о лимите подписи")
+    await settings.reset("text_main")
     for key in ("text_main", "text_tasks", "text_cases"):
         await feed(cb_update(ADMIN, A(s="tx", a="card", v=key).pack()))
     check("12.5" in session.screen().text, "тексты меню, заданий и кейсов редактируются в «Текстах»")
