@@ -3,7 +3,8 @@ import secrets
 import string
 from datetime import datetime
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, CopyTextButton, Message
 from aiogram.utils.callback_answer import CallbackAnswer
@@ -12,10 +13,13 @@ from bot.callbacks import A
 from bot.config import Config
 from bot.database import Database
 from bot.handlers.admin.common import Btn, Input, back, btn, drop_prompt, kb, pager, pages_count, prompt
-from bot.handlers.admin.home import day_start, export_csv
+from bot.handlers.admin.checks import send_preview, status_icon
+from bot.handlers.admin.home import day_start, export_csv, star_balance
 from bot.handlers.user import AD_PREFIX
+from bot.services.checks import MAX_ACTIVATIONS, CheckService
+from bot.services.gifts import GiftImages, gift_emoji
 from bot.settings import Settings
-from bot.utils import esc, fmt_dt, fmt_num, percent, show
+from bot.utils import esc, fmt_dt, fmt_num, percent, progress_bar, show
 
 router = Router(name="admin_ads")
 
@@ -32,6 +36,13 @@ def ad_url(bot_username: str, code: str) -> str:
 def random_code() -> str:
     alphabet = string.ascii_lowercase + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(8))
+
+
+async def free_code(db: Database) -> str:
+    code = random_code()
+    while await db.get_ad_link_by_code(code):
+        code = random_code()
+    return code
 
 
 def money(value: float) -> str:
@@ -56,19 +67,23 @@ async def list_screen(db: Database, archived: bool, page: int):
     lines = ["🗂 <b>Архив рекламных ссылок</b>\n" if archived else "📎 <b>Рекламные ссылки</b>\n"]
     if not archived:
         lines.append("Создайте отдельную ссылку для каждой площадки или поста — бот посчитает переходы, "
-                     "новых пользователей, подписки, приведённых друзей и стоимость каждого.\n")
+                     "новых пользователей, подписки, приведённых друзей и стоимость каждого.\n\n"
+                     "🎟 <b>Рекламный чек</b> — пост с чеком на подарки (например, 100 мишек): "
+                     "та же статистика плюс активации чека и потраченные звёзды.\n")
     if not links:
         lines.append("<i>Пока пусто.</i>")
     for link in links:
         conv = percent(link["verified"], link["new_users"])
-        lines.append(f"• <b>{esc(link['name'])}</b> — 👆 {fmt_num(link['clicks'])} · "
+        lines.append(f"• {'🎟 ' if link['has_check'] else ''}<b>{esc(link['name'])}</b> — 👆 {fmt_num(link['clicks'])} · "
                      f"🆕 {fmt_num(link['new_users'])} · ✅ {conv}%")
 
     v = "arch" if archived else ""
-    rows = [[btn(f"📎 {link['name']} · 🆕 {link['new_users']}", "lk", "card", id=link["id"])] for link in links]
+    rows = [[btn(f"{'🎟' if link['has_check'] else '📎'} {link['name']} · 🆕 {link['new_users']}", "lk", "card",
+                 id=link["id"])] for link in links]
     rows.append(pager("lk", "open", page, pages, v=v))
     if not archived:
-        rows.append([btn("➕ Создать ссылку", "lk", "new", style="success")])
+        rows.append([btn("➕ Создать ссылку", "lk", "new", style="success"),
+                     btn("🎟 Рекламный чек", "lk", "cnew", style="primary")])
         if other:
             rows.append([btn(f"🗂 Архив · {other}", "lk", v="arch")])
         rows.append(back())
@@ -84,14 +99,15 @@ async def cb_list(call: CallbackQuery, callback_data: A, db: Database) -> None:
 
 # ---------- карточка со статистикой ----------
 
-async def card_screen(db: Database, settings: Settings, config: Config, bot_username: str,
+async def card_screen(db: Database, settings: Settings, config: Config, checks: CheckService, bot_username: str,
                       link_id: int, period: int = 7):
     link = await db.get_ad_link(link_id)
     if not link:
         return "❌ Ссылка не найдена", kb(back("lk"))
     period = period if period in PERIODS else 7
     st = await db.ad_link_stats(link_id, settings.goal, day_start(config))
-    url = ad_url(bot_username, link["code"])
+    check = await db.ad_link_check(link_id)
+    url = checks.url(check["code"]) if check else ad_url(bot_username, link["code"])
     cost = link["cost"] or 0.0
     new, verified = st["new_users"], st["verified"]
 
@@ -112,6 +128,25 @@ async def card_screen(db: Database, settings: Settings, config: Config, bot_user
         f"👥 Пригласили друзей: <b>{fmt_num(st['inviters'])}</b> чел. → "
         f"<b>{fmt_num(st['referrals'])}</b> засчитанных рефералов",
         f"🎯 Достигли цели: <b>{fmt_num(st['reached_goal'])}</b> · 🧸 наград: <b>{fmt_num(st['rewards'])}</b>",
+    ]
+    if check:
+        cst = await db.check_stats(check["id"])
+        price = checks.price(check)
+        status = {"⏸": "выключен", "⚪️": "закончился", "🟢": "активен"}[status_icon(check)]
+        lines += [
+            "",
+            f"🎟 <b>Чек</b> <code>{check['code']}</code> · {status_icon(check)} {status} · "
+            f"{checks.emoji(check)} {price} ⭐",
+            f"Активации: <b>{fmt_num(check['used'])} / {fmt_num(check['total'])}</b> · "
+            f"осталось {fmt_num(check['total'] - check['used'])}",
+            f"{progress_bar(check['used'], check['total'])} {percent(check['used'], check['total'])}%",
+            f"🆕 Новых через чек: <b>{fmt_num(cst['new_users'])}</b>",
+            f"🎁 Подарки: ✅ {cst['sent']} · ⏳ {cst['pending']} · ❌ {cst['rejected']} · "
+            f"потрачено <b>{fmt_num(cst['sent'] * price)}</b> ⭐",
+        ]
+        if cst["first_at"]:
+            lines.append(f"🕒 Активации: с {fmt_dt(cst['first_at'], config.tz)} по {fmt_dt(cst['last_at'], config.tz)}")
+    lines += [
         "",
         "📈 <b>Удержание</b>",
         f"🔥 Активны: 24 ч — <b>{fmt_num(st['active24'])}</b> · 7 дн. — <b>{fmt_num(st['active7'])}</b>",
@@ -123,6 +158,7 @@ async def card_screen(db: Database, settings: Settings, config: Config, bot_user
             "💸 <b>Стоимость</b>",
             f"Переход: <b>{per(cost, st['unique_clicks'])}</b> · новый: <b>{per(cost, new)}</b>",
             f"Подписчик: <b>{per(cost, verified)}</b>",
+            *([f"Активация чека: <b>{per(cost, check['used'])}</b>"] if check else []),
             f"С учётом приведённых друзей: <b>{per(cost, verified + st['referrals'])}</b>",
         ]
     if st["first_click"]:
@@ -149,6 +185,10 @@ async def card_screen(db: Database, settings: Settings, config: Config, bot_user
     rows = [
         [Btn(text="📋 Скопировать ссылку", copy_text=CopyTextButton(text=url)),
          btn("🔄 Обновить", "lk", "card", id=lid, p=period)],
+        [Btn(text="📤 Отправить пост", switch_inline_query=f"#{check['code']}"),
+         btn("👁 Пост с чеком", "lk", "cpost", id=lid)] if check else [],
+        [btn("🎟 Открыть чек", "ck", "card", id=check["id"])] if check
+        else [btn("🎟 Добавить чек на подарки", "lk", "cadd", id=lid, style="primary")],
         periods,
         [btn("✏️ Название", "lk", "rename", id=lid), btn("💰 Стоимость", "lk", "cost", id=lid)],
         [btn("📥 Пользователи CSV", "lk", "csv", id=lid)],
@@ -161,8 +201,8 @@ async def card_screen(db: Database, settings: Settings, config: Config, bot_user
 
 @router.callback_query(A.filter((F.s == "lk") & (F.a == "card")))
 async def cb_card(call: CallbackQuery, callback_data: A, db: Database, settings: Settings, config: Config,
-                  bot_username: str) -> None:
-    await show(call, *await card_screen(db, settings, config, bot_username, callback_data.id,
+                  checks: CheckService, bot_username: str) -> None:
+    await show(call, *await card_screen(db, settings, config, checks, bot_username, callback_data.id,
                                         callback_data.p or 7))
 
 
@@ -178,14 +218,14 @@ async def cb_csv(call: CallbackQuery, callback_data: A, callback_answer: Callbac
 
 @router.callback_query(A.filter((F.s == "lk") & (F.a == "arch")))
 async def cb_archive(call: CallbackQuery, callback_data: A, callback_answer: CallbackAnswer, db: Database,
-                     settings: Settings, config: Config, bot_username: str) -> None:
+                     settings: Settings, config: Config, checks: CheckService, bot_username: str) -> None:
     link = await db.get_ad_link(callback_data.id)
     if not link:
         return
     await db.update_ad_link(link["id"], is_archived=int(not link["is_archived"]))
     callback_answer.text = "Возвращена из архива" if link["is_archived"] else "🗂 Перенесена в архив — переходы " \
                                                                               "продолжают считаться"
-    await show(call, *await card_screen(db, settings, config, bot_username, link["id"]))
+    await show(call, *await card_screen(db, settings, config, checks, bot_username, link["id"]))
 
 
 @router.callback_query(A.filter((F.s == "lk") & (F.a == "del")))
@@ -195,7 +235,7 @@ async def cb_delete_confirm(call: CallbackQuery, callback_data: A, db: Database)
         return
     await show(call, f"🗑 <b>Удалить ссылку «{esc(link['name'])}»?</b>\n\n"
                      "Статистика по ней пропадёт, а переходы по ссылке перестанут считаться. "
-                     "Пользователи останутся в боте.\n\n"
+                     "Пользователи останутся в боте, рекламный чек продолжит работать.\n\n"
                      "<i>Если нужно просто убрать её из списка — используйте архив.</i>", kb(
         [btn("🗑 Да, удалить", "lk", "del_ok", id=link["id"], style="danger")],
         [btn("🗂 Лучше в архив", "lk", "arch", id=link["id"])],
@@ -240,16 +280,16 @@ async def on_name(message: Message, state: FSMContext, bot_username: str) -> Non
 
 
 async def _create(event: Message | CallbackQuery, state: FSMContext, db: Database, settings: Settings,
-                  config: Config, bot_username: str, code: str) -> None:
+                  config: Config, checks: CheckService, bot_username: str, code: str) -> None:
     data = await state.get_data()
     await state.clear()
     link_id = await db.create_ad_link(code, data["name"], event.from_user.id)
-    await show(event, *await card_screen(db, settings, config, bot_username, link_id))
+    await show(event, *await card_screen(db, settings, config, checks, bot_username, link_id))
 
 
 @router.message(Input.ad_code, F.text)
 async def on_code(message: Message, state: FSMContext, db: Database, settings: Settings, config: Config,
-                  bot_username: str) -> None:
+                  checks: CheckService, bot_username: str) -> None:
     code = message.text.strip()
     if not CODE_RE.match(code):
         await message.answer("⚠️ Только латиница, цифры, <code>_</code> и <code>-</code>, от 2 до 32 символов")
@@ -259,17 +299,14 @@ async def on_code(message: Message, state: FSMContext, db: Database, settings: S
         return
     await drop_prompt(message, state)
     await message.answer("✅ Ссылка создана — копируйте и запускайте рекламу")
-    await _create(message, state, db, settings, config, bot_username, code)
+    await _create(message, state, db, settings, config, checks, bot_username, code)
 
 
 @router.callback_query(A.filter((F.s == "lk") & (F.a == "rnd")), Input.ad_code, flags=KEEP)
 async def cb_random(call: CallbackQuery, callback_answer: CallbackAnswer, state: FSMContext, db: Database,
-                    settings: Settings, config: Config, bot_username: str) -> None:
-    code = random_code()
-    while await db.get_ad_link_by_code(code):
-        code = random_code()
+                    settings: Settings, config: Config, checks: CheckService, bot_username: str) -> None:
     callback_answer.text = "✅ Ссылка создана"
-    await _create(call, state, db, settings, config, bot_username, code)
+    await _create(call, state, db, settings, config, checks, bot_username, await free_code(db))
 
 
 # ---------- редактирование ----------
@@ -282,7 +319,7 @@ async def cb_rename(call: CallbackQuery, callback_data: A, state: FSMContext) ->
 
 @router.message(Input.ad_rename, F.text)
 async def on_rename(message: Message, state: FSMContext, db: Database, settings: Settings, config: Config,
-                    bot_username: str) -> None:
+                    checks: CheckService, bot_username: str) -> None:
     name = message.text.strip()
     if not 1 <= len(name) <= 64:
         await message.answer("⚠️ Название должно быть от 1 до 64 символов")
@@ -290,7 +327,7 @@ async def on_rename(message: Message, state: FSMContext, db: Database, settings:
     data = await drop_prompt(message, state)
     await state.clear()
     await db.update_ad_link(data["link_id"], name=name)
-    await show(message, *await card_screen(db, settings, config, bot_username, data["link_id"]))
+    await show(message, *await card_screen(db, settings, config, checks, bot_username, data["link_id"]))
 
 
 @router.callback_query(A.filter((F.s == "lk") & (F.a == "cost")))
@@ -304,7 +341,7 @@ async def cb_cost(call: CallbackQuery, callback_data: A, state: FSMContext) -> N
 
 @router.message(Input.ad_cost, F.text)
 async def on_cost(message: Message, state: FSMContext, db: Database, settings: Settings, config: Config,
-                  bot_username: str) -> None:
+                  checks: CheckService, bot_username: str) -> None:
     raw = message.text.strip().replace(" ", "").replace(" ", "").replace(",", ".").rstrip("₽р.")
     try:
         cost = float(raw)
@@ -316,4 +353,122 @@ async def on_cost(message: Message, state: FSMContext, db: Database, settings: S
     data = await drop_prompt(message, state)
     await state.clear()
     await db.update_ad_link(data["link_id"], cost=cost)
-    await show(message, *await card_screen(db, settings, config, bot_username, data["link_id"]))
+    await show(message, *await card_screen(db, settings, config, checks, bot_username, data["link_id"]))
+
+
+# ---------- рекламный чек ----------
+
+POST_HINT = ("👆 <b>Готовый пост с чеком</b> — перешлите его рекламщику или в канал (кнопка сохранится), "
+             "либо отправьте в любой чат кнопкой «📤 Отправить пост».\n\n"
+             "Переходы по чеку, новые пользователи, подписки и активации — в статистике рекламы.")
+
+
+async def post_photo(check, db: Database, settings: Settings, gift_images: GiftImages) -> str | None:
+    """Картинка поста — как у inline-чека: баннер подарка, общий баннер со значком или без картинки."""
+    gift = await gift_images.catalog.get(check["gift_id"] or "")
+    if gift:
+        return await gift_images.file_id(gift)
+    return await db.get_gift_banner(check["gift_id"] or "") or settings.get("check_photo") or None
+
+
+def cancel_check(data: dict) -> list[Btn]:
+    if data.get("link_id"):
+        return back("lk", "card", "✖️ Отмена", id=data["link_id"])
+    return back("lk", text="✖️ Отмена")
+
+
+@router.callback_query(A.filter((F.s == "lk") & (F.a == "cnew")))
+async def cb_check_new(call: CallbackQuery, state: FSMContext) -> None:
+    await prompt(call, state, Input.adc_name,
+                 "🎟 <b>Рекламный чек — шаг 1 из 3</b>\n\n"
+                 "Пост с чеком на подарки для рекламы: бот посчитает переходы, новых пользователей, подписки, "
+                 "активации и потраченные звёзды.\n\n"
+                 "Как назвать рекламу? Название видите только вы.\n"
+                 "Например: <i>Канал @crypto_news, пост 25.09</i>",
+                 back("lk", text="✖️ Отмена"))
+
+
+@router.callback_query(A.filter((F.s == "lk") & (F.a == "cadd")))
+async def cb_check_add(call: CallbackQuery, callback_data: A, state: FSMContext, db: Database) -> None:
+    link = await db.get_ad_link(callback_data.id)
+    if not link:
+        return
+    await prompt(call, state, Input.adc_total,
+                 f"🎟 <b>Чек для «{esc(link['name'])}»</b>\n\n"
+                 "Сколько подарков в чеке? Пришлите число активаций, например <code>100</code>.",
+                 back("lk", "card", "✖️ Отмена", id=link["id"]), link_id=link["id"])
+
+
+@router.message(Input.adc_name, F.text)
+async def on_check_name(message: Message, state: FSMContext) -> None:
+    name = message.text.strip()
+    if not 1 <= len(name) <= 64:
+        await message.answer("⚠️ Название должно быть от 1 до 64 символов")
+        return
+    await drop_prompt(message, state)
+    await state.set_state(Input.adc_total)
+    msg = await message.answer("🎟 <b>Шаг 2 из 3 — сколько подарков?</b>\n\n"
+                               "Пришлите число активаций чека, например <code>100</code>. "
+                               "Каждый человек активирует чек один раз.",
+                               reply_markup=kb(back("lk", text="✖️ Отмена")))
+    await state.update_data(name=name, prompt_id=msg.message_id)
+
+
+@router.message(Input.adc_total, F.text)
+async def on_check_total(message: Message, state: FSMContext, bot: Bot, settings: Settings,
+                         gift_images: GiftImages) -> None:
+    raw = message.text.strip().replace(" ", "")
+    if not raw.isdigit() or not 1 <= int(raw) <= MAX_ACTIVATIONS:
+        await message.answer(f"⚠️ Пришлите число от 1 до {fmt_num(MAX_ACTIVATIONS)}")
+        return
+    total = int(raw)
+    data = await drop_prompt(message, state)
+    default_id = settings.get("gift_id")
+    gifts = sorted(await gift_images.catalog.gifts(), key=lambda g: (g.id != default_id, g.star_count))
+    if not gifts:
+        await message.answer("⚠️ Не удалось загрузить подарки — попробуйте ещё раз")
+        return
+    balance = await star_balance(bot)
+    await state.set_state(Input.adc_gift)
+    rows = [[btn(f"{gift_emoji(g)} {g.star_count} ⭐ × {fmt_num(total)} = {fmt_num(g.star_count * total)} ⭐",
+                 "lk", "cgift", v=g.id, style="primary" if g.id == default_id else None)] for g in gifts[:30]]
+    text = (f"🎁 <b>Шаг 3 из 3 — какой подарок?</b>\n\n"
+            f"Чек на <b>{fmt_num(total)}</b> активаций. Звёзды списываются при каждой активации, а не сразу.")
+    if balance is not None:
+        text += f"\n⭐ Баланс бота: <b>{fmt_num(balance)}</b>"
+        if settings.get("reward_mode") == "auto" and balance < gifts[0].star_count * total:
+            text += " — на весь чек может не хватить, остальное уйдёт в заявки"
+    msg = await message.answer(text, reply_markup=kb(*rows, cancel_check(data)))
+    await state.update_data(total=total, prompt_id=msg.message_id)
+
+
+@router.callback_query(A.filter((F.s == "lk") & (F.a == "cgift")), Input.adc_gift, flags=KEEP)
+async def cb_check_gift(call: CallbackQuery, callback_data: A, callback_answer: CallbackAnswer, state: FSMContext,
+                        db: Database, settings: Settings, config: Config, checks: CheckService,
+                        gift_images: GiftImages, bot_username: str) -> None:
+    gift = await gift_images.catalog.get(callback_data.v)
+    if not gift:
+        callback_answer.text = "⚠️ Подарок больше недоступен — выберите другой"
+        return
+    data = await state.get_data()
+    await state.clear()
+    link_id = data.get("link_id") or await db.create_ad_link(await free_code(db), data["name"], call.from_user.id)
+    check = await checks.create_ad_check(call.from_user.id, data["total"], gift, link_id)
+    callback_answer.text = "✅ Рекламный чек создан"
+    try:
+        await call.message.delete()
+    except TelegramBadRequest:
+        pass
+    await send_preview(call.message, checks, await post_photo(check, db, settings, gift_images), check)
+    await call.message.answer(POST_HINT)
+    await show(call.message, *await card_screen(db, settings, config, checks, bot_username, link_id))
+
+
+@router.callback_query(A.filter((F.s == "lk") & (F.a == "cpost")))
+async def cb_check_post(call: CallbackQuery, callback_data: A, db: Database, settings: Settings,
+                        checks: CheckService, gift_images: GiftImages) -> None:
+    check = await db.ad_link_check(callback_data.id)
+    if not check:
+        return
+    await send_preview(call.message, checks, await post_photo(check, db, settings, gift_images), check)
+    await call.message.answer(POST_HINT, reply_markup=kb(back("lk", "card", "« К статистике", id=callback_data.id)))

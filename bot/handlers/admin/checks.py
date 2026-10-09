@@ -78,7 +78,7 @@ async def main_screen(bot: Bot, db: Database, settings: Settings, bot_username: 
     if has_photo:
         rows.append([btn("🗑 Убрать общий баннер", "ck", "nophoto")])
     for c in items:
-        rows.append([btn(f"{status_icon(c)} {'🔐 ' if c['password'] else ''}{c['gift_emoji'] or ''} {c['code']} · {c['used']}/{c['total']}"
+        rows.append([btn(f"{status_icon(c)} {'📎 ' if c['ad_link_id'] else ''}{'🔐 ' if c['password'] else ''}{c['gift_emoji'] or ''} {c['code']} · {c['used']}/{c['total']}"
                          + (f" · {c['caption'][:20]}" if c["caption"] else ""), "ck", "card", id=c["id"])])
     rows.append(pager("ck", "open", page, pages))
     rows.append(back())
@@ -94,6 +94,7 @@ async def card_screen(db: Database, checks: CheckService, config: Config, check_
     recent = await db.check_activations(check_id, 5, 0)
     status = {"⏸": "выключен", "⚪️": "закончился", "🟢": "активен"}[status_icon(c)]
     left = c["total"] - c["used"]
+    ad = await db.get_ad_link(c["ad_link_id"]) if c["ad_link_id"] else None
 
     lines = [
         f"🎟 <b>Чек</b> <code>{c['code']}</code> · {status_icon(c)} {status}",
@@ -101,6 +102,7 @@ async def card_screen(db: Database, checks: CheckService, config: Config, check_
         f"🎁 Подарок: {checks.emoji(c)} · {checks.price(c)} ⭐ за активацию",
         f"💬 Подпись: «{esc(c['caption'])}»" if c["caption"] else "💬 Подпись: из шаблона «Тексты → Подпись чека»",
         f"🔐 Пароль: <code>{esc(c['password'])}</code>" if c["password"] else "🔓 Без пароля",
+        *([f"📎 Рекламный чек: <b>{esc(ad['name'])}</b>"] if ad else []),
         "",
         f"📊 Активации: <b>{fmt_num(c['used'])} / {fmt_num(c['total'])}</b> · осталось {fmt_num(left)}",
         f"{progress_bar(c['used'], c['total'])} {percent(c['used'], c['total'])}%",
@@ -122,6 +124,7 @@ async def card_screen(db: Database, checks: CheckService, config: Config, check_
         [Btn(text="📤 Отправить ещё раз", switch_inline_query=f"#{c['code']}"),
          Btn(text="📋 Ссылка", copy_text=CopyTextButton(text=checks.url(c["code"])))],
         [btn(f"👥 Все активации ({c['used']})", "ck", "acts", id=cid), btn("🔄", "ck", "card", id=cid)],
+        [btn("📊 Статистика рекламы", "lk", "card", id=ad["id"])] if ad else [],
         [btn("▶️ Включить" if not c["is_active"] else "⏸ Выключить", "ck", "toggle", id=cid),
          btn("🗑 Удалить", "ck", "del", id=cid, style="danger")],
         back("ck", text="« К чекам"),

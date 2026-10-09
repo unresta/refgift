@@ -116,6 +116,8 @@ async def cmd_start(message: Message, command: CommandObject, user: Row, is_new:
         await db.set_pending_check(user["user_id"], code)
         if check and is_new:
             await db.set_source_check(user["user_id"], check["id"])
+        if check and check["ad_link_id"]:  # рекламный чек — переход идёт в статистику рекламной ссылки
+            await db.track_ad_click(check["ad_link_id"], user["user_id"], is_new)
     elif args.startswith(AD_PREFIX):
         link = await db.get_ad_link_by_code(args.removeprefix(AD_PREFIX))
         if link:

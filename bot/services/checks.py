@@ -98,11 +98,20 @@ class CheckService:
         if time.monotonic() - self._last_cleanup > 3600:
             self._last_cleanup = time.monotonic()
             await self.db.cleanup_check_drafts()
+        return await self._create(admin_id, total, caption, with_photo, gift, password)
+
+    async def create_ad_check(self, admin_id: int, total: int, gift: Gift, ad_link_id: int) -> Row:
+        """Рекламный чек: сразу «отправлен» (виден в списке), переходы по нему идут в статистику ссылки."""
+        with_photo = bool(self.settings.get("check_photo") or await self.db.get_gift_banner(gift.id))
+        return await self._create(admin_id, total, None, with_photo, gift, None, ad_link_id)
+
+    async def _create(self, admin_id: int, total: int, caption: str | None, with_photo: bool, gift: Gift,
+                      password: str | None, ad_link_id: int | None = None) -> Row:
         code = random_code()
         while await self.db.get_check_by_code(code):
             code = random_code()
         check_id = await self.db.create_check(code, total, caption, with_photo, admin_id,
-                                              gift.id, gift_emoji(gift), gift.star_count, password)
+                                              gift.id, gift_emoji(gift), gift.star_count, password, ad_link_id)
         check = await self.db.get_check(check_id)
         assert check is not None
         return check

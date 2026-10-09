@@ -309,11 +309,13 @@ MIGRATIONS = [
     ("nft_gifts", "emoji_id", "TEXT"),      # премиум-эмодзи — иконка на кнопке подарка
     ("checks", "password", "TEXT"),         # пароль чека (NULL — без пароля)
     ("users", "balance", "INTEGER NOT NULL DEFAULT 0"),  # звёзды в боте, сотые доли
+    ("checks", "ad_link_id", "INTEGER"),    # рекламный чек: переходы по нему считаются в рекламной ссылке
 ]
 POST_MIGRATION_SQL = """
 CREATE INDEX IF NOT EXISTS idx_users_ad_link ON users(ad_link_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_users_check ON users(source_check_id);
 CREATE INDEX IF NOT EXISTS idx_users_remind ON users(remind_at) WHERE remind_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_checks_ad_link ON checks(ad_link_id) WHERE ad_link_id IS NOT NULL;
 """
 
 TOTAL = "(ref_count + bonus_refs)"
@@ -688,7 +690,8 @@ class Database:
             "SELECT l.*, "
             "  (SELECT COUNT(*) FROM users u WHERE u.ad_link_id = l.id) AS new_users, "
             "  (SELECT COUNT(*) FROM users u WHERE u.ad_link_id = l.id AND u.verified_at IS NOT NULL) AS verified, "
-            "  (SELECT COUNT(*) FROM ad_clicks c WHERE c.link_id = l.id) AS clicks "
+            "  (SELECT COUNT(*) FROM ad_clicks c WHERE c.link_id = l.id) AS clicks, "
+            "  EXISTS (SELECT 1 FROM checks k WHERE k.ad_link_id = l.id) AS has_check "
             "FROM ad_links l WHERE l.is_archived = ? ORDER BY l.id DESC LIMIT ? OFFSET ?",
             int(archived), limit, offset,
         )
@@ -705,6 +708,7 @@ class Database:
     async def delete_ad_link(self, link_id: int) -> None:
         await self.conn.execute("UPDATE users SET ad_link_id = NULL WHERE ad_link_id = ?", (link_id,))
         await self.conn.execute("DELETE FROM ad_clicks WHERE link_id = ?", (link_id,))
+        await self.conn.execute("UPDATE checks SET ad_link_id = NULL WHERE ad_link_id = ?", (link_id,))
         await self.conn.execute("DELETE FROM ad_links WHERE id = ?", (link_id,))
         await self.conn.commit()
 
@@ -766,11 +770,12 @@ class Database:
     # ---------- чеки ----------
     async def create_check(self, code: str, total: int, caption: str | None, with_photo: bool,
                            created_by: int, gift_id: str, gift_emoji: str, gift_price: int,
-                           password: str | None = None) -> int:
+                           password: str | None = None, ad_link_id: int | None = None) -> int:
         cur = await self.conn.execute(
             "INSERT INTO checks (code, total, caption, with_photo, created_by, created_at, gift_id, gift_emoji, "
-            "gift_price, password) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (code, total, caption, int(with_photo), created_by, now(), gift_id, gift_emoji, gift_price, password),
+            "gift_price, password, ad_link_id, is_sent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (code, total, caption, int(with_photo), created_by, now(), gift_id, gift_emoji, gift_price, password,
+             ad_link_id, int(ad_link_id is not None)),
         )
         await self.conn.commit()
         return cur.lastrowid or 0
@@ -807,6 +812,13 @@ class Database:
         return await self.one(
             "SELECT c.*, (SELECT COUNT(*) FROM check_activations a WHERE a.check_id = c.id) AS used "
             "FROM checks c WHERE c.code = ?", code,
+        )
+
+    async def ad_link_check(self, link_id: int) -> aiosqlite.Row | None:
+        """Рекламный чек ссылки (последний, если их несколько)."""
+        return await self.one(
+            "SELECT c.*, (SELECT COUNT(*) FROM check_activations a WHERE a.check_id = c.id) AS used "
+            "FROM checks c WHERE c.ad_link_id = ? ORDER BY c.id DESC LIMIT 1", link_id,
         )
 
     VISIBLE_CHECKS = "(c.is_sent = 1 OR EXISTS (SELECT 1 FROM check_activations a WHERE a.check_id = c.id))"

@@ -1197,6 +1197,64 @@ async def scenario(dp, db, bot, session) -> None:
     check("🔐 Пароль: <code>Весна</code>" in session.screen().text and "2 / 5" in session.screen().text,
           "в карточке чека админ видит пароль")
 
+    print("  — рекламный чек")
+    await feed(cb_update(ADMIN, A(s="lk").pack()))
+    await feed(cb_update(ADMIN, A(s="lk", a="cnew").pack()))
+    await feed(msg_update(ADMIN, "Канал @gifts, пост 10.10"))
+    await feed(msg_update(ADMIN, "сто"))
+    check("число от 1" in session.texts_to(ADMIN)[-1], "рекламный чек: число активаций проверяется")
+    await feed(msg_update(ADMIN, "100"))
+    check("Шаг 3 из 3" in session.screen().text and "15 ⭐ × 100 = 1 500 ⭐" in str(session.screen().reply_markup),
+          "рекламный чек: выбор подарка с итоговой стоимостью")
+    await feed(cb_update(ADMIN, A(s="lk", a="cgift", v="g_bear").pack()))
+    ad_check = await db.val("SELECT id FROM checks WHERE ad_link_id IS NOT NULL ORDER BY id DESC LIMIT 1")
+    ad_check = await db.get_check(ad_check)
+    ad_link = await db.get_ad_link(ad_check["ad_link_id"])
+    check(ad_link["name"] == "Канал @gifts, пост 10.10" and ad_check["total"] == 100 and ad_check["gift_id"] == "g_bear"
+          and ad_check["is_sent"] == 1, "рекламный чек создан: ссылка + чек на 100 🧸, сразу в списке чеков")
+    post = session.by_type(SendPhoto)[-1]
+    check(f"c_{ad_check['code']}" in str(post.reply_markup), "админу пришёл готовый пост с кнопкой чека")
+    check("🎟 <b>Чек</b>" in session.screen().text and f"c_{ad_check['code']}" in session.screen().text
+          and "0 / 100" in session.screen().text, "карточка рекламы: ссылка чека и его статистика")
+
+    gifts_before = len(session.by_type(SendGift))
+    await feed(msg_update(530, f"/start c_{ad_check['code']}"))
+    await feed(msg_update(530, f"/start c_{ad_check['code']}"))
+    session.members.update({(CHANNEL, 530), (-1002, 530)})
+    await feed(cb_update(530, U(a="check").pack()))
+    session.members.update({(CHANNEL, 531), (-1002, 531)})
+    await feed(msg_update(531, f"/start c_{ad_check['code']}"))
+    await feed(msg_update(100, f"/start c_{ad_check['code']}"))
+    check(len(session.by_type(SendGift)) == gifts_before + 3, "рекламный чек выдаёт подарки")
+    st = await db.ad_link_stats(ad_link["id"], settings.goal, 0)
+    check(st["clicks"] == 4 and st["unique_clicks"] == 3 and st["new_users"] == 2 and st["verified"] == 2
+          and st["returning_users"] == 1,
+          f"переходы по чеку — в рекламе: {st['clicks']} / уник. {st['unique_clicks']} / новых {st['new_users']}")
+    await feed(cb_update(ADMIN, A(s="lk", a="cost", id=ad_link["id"]).pack()))
+    await feed(msg_update(ADMIN, "3000"))
+    text = session.texts_to(ADMIN)[-1]
+    check("3 / 100" in text and "✅ 3" in text and "потрачено <b>45</b> ⭐" in text
+          and "Активация чека: <b>1 000 ₽</b>" in text, "статистика чека и цена активации в карточке рекламы")
+    await feed(cb_update(ADMIN, A(s="lk").pack()))
+    check("🎟 <b>Канал @gifts" in session.screen().text, "в списке рекламы чек помечен 🎟")
+    await feed(cb_update(ADMIN, A(s="lk", a="cpost", id=ad_link["id"]).pack()))
+    check(session.by_type(SendPhoto)[-1].caption == post.caption, "пост с чеком можно получить повторно")
+    await feed(cb_update(ADMIN, A(s="ck", a="card", id=ad_check["id"]).pack()))
+    check("📎 Рекламный чек: <b>Канал @gifts" in session.screen().text, "в карточке чека видна реклама")
+
+    await feed(cb_update(ADMIN, A(s="lk", a="new").pack()))
+    await feed(msg_update(ADMIN, "Без чека"))
+    await feed(cb_update(ADMIN, A(s="lk", a="rnd").pack()))
+    plain_link = (await db.list_ad_links(False, 1, 0))[0]
+    await feed(cb_update(ADMIN, A(s="lk", a="cadd", id=plain_link["id"]).pack()))
+    await feed(msg_update(ADMIN, "5"))
+    await feed(cb_update(ADMIN, A(s="lk", a="cgift", v="g_rose").pack()))
+    added = await db.ad_link_check(plain_link["id"])
+    check(added is not None and added["total"] == 5 and added["gift_id"] == "g_rose"
+          and await db.count_ad_links(False) == 3, "чек добавлен к существующей рекламной ссылке")
+    await db.delete_ad_link(ad_link["id"])
+    check((await db.get_check(ad_check["id"]))["ad_link_id"] is None, "удаление рекламы отвязывает чек")
+
     print("Баннеры подарков")
     for cb in (A(s="ck"), A(s="ck", a="banners"), A(s="ck", a="banner", v="g_rose")):
         await feed(cb_update(ADMIN, cb.pack()))
