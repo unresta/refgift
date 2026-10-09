@@ -83,10 +83,7 @@ class CheckService:
             template = check["caption"]
         else:
             template = esc(check["caption"])
-        text = render_template(template, gift=self.emoji(check), count=check["total"])
-        if _get(check, "password"):
-            text += "\n\n🔐 <b>Чек с паролем</b> — после перехода бот попросит его ввести."
-        return text
+        return render_template(template, gift=self.emoji(check), count=check["total"])
 
     def keyboard(self, check: Row | dict) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(inline_keyboard=[[

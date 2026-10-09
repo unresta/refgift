@@ -53,7 +53,9 @@ async def check_result(check: Row, checks: CheckService, settings: Settings, ima
     common = dict(id=f"{RESULT_PREFIX}{check['id']}", title=title, description=description,
                   reply_markup=checks.keyboard(check))
     gift = gift or await images.catalog.get(check["gift_id"] or "")
-    if gift:
+    if check["photo"]:  # своя картинка рекламного чека
+        photo = check["photo"]
+    elif gift:
         photo = await images.file_id(gift)
     else:  # подарок пропал из каталога — берём сохранённый баннер или общий
         photo = await images.db.get_gift_banner(check["gift_id"] or "") or settings.get("check_photo") or None

@@ -63,6 +63,7 @@ class Input(StatesGroup):
     adc_gift = State()   # …выбор подарка
     adc_edit_text = State()
     adc_edit_password = State()
+    adc_photo = State()
     check_photo = State()
     gift_banner = State()
     remind_interval = State()

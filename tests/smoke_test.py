@@ -1144,7 +1144,7 @@ async def scenario(dp, db, bot, session) -> None:
           and answer.results[0].title.startswith("🔐") and "Пароль: Весна" in answer.results[0].description
           and "пароль: Весна" in answer.button.text, "инлайн: пароль из запроса, в карточке и подсказке")
     caption = answer.results[0].caption
-    check("Весна" not in caption and "С праздником!" in caption and "Чек с паролем" in caption,
+    check("Весна" not in caption and "С праздником!" in caption and "пароль" not in caption.lower(),
           "в тексте чека пароля нет — только пометка 🔐")
     await feed(inline_update(ADMIN, "5 С праздником!"))
     plain = await db.get_check(int(session.by_type(AnswerInlineQuery)[-1].results[0].id.removeprefix("chk:")))
@@ -1224,7 +1224,7 @@ async def scenario(dp, db, bot, session) -> None:
     post = session.by_type(SendPhoto)[-1]
     check(f"c_{ad_check['code']}" in str(post.reply_markup), "админу пришёл готовый пост с кнопкой чека")
     check(post.caption.startswith("<b>Раздаём</b> 🧸 — 100 штук!") and "Мишка" not in post.caption
-          and "Чек с паролем" in post.caption, "свой текст с форматированием и подстановками, пароля в посте нет")
+          and "парол" not in post.caption, "свой текст с форматированием и подстановками, пароля в посте нет")
     check("Пароль: <code>Мишка</code>" in session.texts_to(ADMIN)[-2], "админу напомнили пароль")
     check("🎟 <b>Чек</b>" in session.screen().text and f"c_{ad_check['code']}" in session.screen().text
           and "0 / 100" in session.screen().text and "Текст: свой" in session.screen().text,
@@ -1267,6 +1267,19 @@ async def scenario(dp, db, bot, session) -> None:
     await feed(cb_update(ADMIN, A(s="lk", a="ctext_reset", id=ad_link["id"]).pack()))
     check((await db.get_check(ad_check["id"]))["caption"] is None and "Текст: стандартный" in session.screen().text,
           "возврат к стандартному тексту")
+
+    await feed(cb_update(ADMIN, A(s="lk", a="cphoto", id=ad_link["id"]).pack()))
+    await feed(msg_update(ADMIN, None, photo=[{"file_id": "ad_photo", "file_unique_id": "ap",
+                                               "width": 1280, "height": 720}]))
+    check((await db.get_check(ad_check["id"]))["photo"] == "ad_photo" and session.by_type(SendPhoto)[-1].photo
+          == "ad_photo" and "картинка: своя" in session.screen().text, "своя картинка чека: сохранена, показан пост")
+    await feed(inline_update(ADMIN, f"#{ad_check['code']}"))
+    check(session.by_type(AnswerInlineQuery)[-1].results[0].photo_file_id == "ad_photo",
+          "inline-отправка чека — со своей картинкой")
+    await feed(cb_update(ADMIN, A(s="lk", a="cphoto", id=ad_link["id"]).pack()))
+    await feed(cb_update(ADMIN, A(s="lk", a="cphoto_off", id=ad_link["id"]).pack()))
+    check((await db.get_check(ad_check["id"]))["photo"] is None and "картинка: подарка" in session.screen().text,
+          "возврат к картинке подарка")
 
     await feed(cb_update(ADMIN, A(s="lk").pack()))
     check("🎟 <b>Канал @gifts" in session.screen().text, "в списке рекламы чек помечен 🎟")

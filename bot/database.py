@@ -311,6 +311,7 @@ MIGRATIONS = [
     ("users", "balance", "INTEGER NOT NULL DEFAULT 0"),  # звёзды в боте, сотые доли
     ("checks", "ad_link_id", "INTEGER"),    # рекламный чек: переходы по нему считаются в рекламной ссылке
     ("checks", "caption_html", "INTEGER NOT NULL DEFAULT 0"),  # подпись — HTML (с форматированием), не текст
+    ("checks", "photo", "TEXT"),            # своя картинка чека (NULL — баннер подарка / общий)
 ]
 POST_MIGRATION_SQL = """
 CREATE INDEX IF NOT EXISTS idx_users_ad_link ON users(ad_link_id, created_at);
@@ -842,7 +843,7 @@ class Database:
         )
 
     async def update_check(self, check_id: int, **fields: Any) -> None:
-        allowed = {"caption", "caption_html", "password"}
+        allowed = {"caption", "caption_html", "password", "photo"}
         assert set(fields) <= allowed, fields
         sets = ", ".join(f"{k} = ?" for k in fields)
         await self.run(f"UPDATE checks SET {sets} WHERE id = ?", *fields.values(), check_id)

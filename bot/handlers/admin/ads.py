@@ -13,7 +13,7 @@ from bot.callbacks import A
 from bot.config import Config
 from bot.database import Database
 from bot.handlers.admin.common import Btn, Input, back, btn, drop_prompt, kb, pager, pages_count, prompt
-from bot.handlers.admin.checks import send_preview, status_icon
+from bot.handlers.admin.checks import IMAGE_HINT, read_image, send_preview, status_icon
 from bot.handlers.admin.home import day_start, export_csv, star_balance
 from bot.handlers.user import AD_PREFIX
 from bot.services.checks import MAX_ACTIVATIONS, PASSWORD_MAX, CheckService
@@ -142,6 +142,7 @@ async def card_screen(db: Database, settings: Settings, config: Config, checks: 
             f"осталось {fmt_num(check['total'] - check['used'])}",
             f"{progress_bar(check['used'], check['total'])} {percent(check['used'], check['total'])}%",
             f"💬 Текст: {'свой' if check['caption'] else 'стандартный'} · "
+            f"🖼 картинка: {'своя' if check['photo'] else 'подарка'} · "
             + (f"🔐 пароль <code>{esc(check['password'])}</code>" if check["password"] else "🔓 без пароля"),
             f"🆕 Новых через чек: <b>{fmt_num(cst['new_users'])}</b>",
             f"🎁 Подарки: ✅ {cst['sent']} · ⏳ {cst['pending']} · ❌ {cst['rejected']} · "
@@ -190,7 +191,8 @@ async def card_screen(db: Database, settings: Settings, config: Config, checks: 
          btn("🔄 Обновить", "lk", "card", id=lid, p=period)],
         [Btn(text="📤 Отправить пост", switch_inline_query=f"#{check['code']}"),
          btn("👁 Пост с чеком", "lk", "cpost", id=lid)] if check else [],
-        [btn("💬 Текст чека", "lk", "ctext", id=lid), btn("🔐 Пароль", "lk", "cpw", id=lid)] if check else [],
+        [btn("💬 Текст", "lk", "ctext", id=lid), btn("🖼 Картинка", "lk", "cphoto", id=lid),
+         btn("🔐 Пароль", "lk", "cpw", id=lid)] if check else [],
         [btn("🎟 Открыть чек", "ck", "card", id=check["id"])] if check
         else [btn("🎟 Добавить чек на подарки", "lk", "cadd", id=lid, style="primary")],
         periods,
@@ -372,7 +374,9 @@ PASSWORD_HINT = ("В тексте поста пароля не будет — у
 
 
 async def post_photo(check, db: Database, settings: Settings, gift_images: GiftImages) -> str | None:
-    """Картинка поста — как у inline-чека: баннер подарка, общий баннер со значком или без картинки."""
+    """Картинка поста — как у inline-чека: своя, баннер подарка, общий баннер со значком или без картинки."""
+    if check["photo"]:
+        return check["photo"]
     gift = await gift_images.catalog.get(check["gift_id"] or "")
     if gift:
         return await gift_images.file_id(gift)
@@ -644,4 +648,46 @@ async def cb_check_password_off(call: CallbackQuery, callback_data: A, callback_
     if check := await db.ad_link_check(callback_data.id):
         await db.update_check(check["id"], password=None)
     callback_answer.text = "🔓 Пароль убран — чек работает без него"
+    await show(call, *await card_screen(db, settings, config, checks, bot_username, callback_data.id))
+
+
+@router.callback_query(A.filter((F.s == "lk") & (F.a == "cphoto")))
+async def cb_check_photo(call: CallbackQuery, callback_data: A, state: FSMContext, db: Database) -> None:
+    check = await db.ad_link_check(callback_data.id)
+    if not check:
+        return
+    rows = [back("lk", "card", "✖️ Отмена", id=callback_data.id)]
+    if check["photo"]:
+        rows.insert(0, [btn("↩️ Вернуть картинку подарка", "lk", "cphoto_off", id=callback_data.id)])
+    await state.set_state(Input.adc_photo)
+    msg = await show(call, "🖼 <b>Картинка чека</b> — сейчас "
+                           f"{'своя' if check['photo'] else 'баннер подарка'}\n\n" + IMAGE_HINT.replace(
+                               "Применится к новым отправкам чеков.",
+                               "Уже опубликованные посты не изменятся — возьмите новый «👁 Пост с чеком»."),
+                     kb(*rows))
+    await state.update_data(prompt_id=msg.message_id if msg else None, link_id=callback_data.id)
+
+
+@router.message(Input.adc_photo)
+async def on_check_photo(message: Message, state: FSMContext, bot: Bot, db: Database, settings: Settings,
+                         config: Config, checks: CheckService, gift_images: GiftImages, bot_username: str) -> None:
+    file_id = await read_image(message, bot)
+    if not file_id:
+        return
+    data = await drop_prompt(message, state)
+    await state.clear()
+    check = await db.ad_link_check(data["link_id"])
+    if check:
+        await db.update_check(check["id"], photo=file_id)
+        await message.answer("✅ Картинка сохранена. Так выглядит пост:")
+        await send_post(message, await db.get_check(check["id"]), db, settings, checks, gift_images)
+    await show(message, *await card_screen(db, settings, config, checks, bot_username, data["link_id"]))
+
+
+@router.callback_query(A.filter((F.s == "lk") & (F.a == "cphoto_off")))
+async def cb_check_photo_off(call: CallbackQuery, callback_data: A, callback_answer: CallbackAnswer, db: Database,
+                             settings: Settings, config: Config, checks: CheckService, bot_username: str) -> None:
+    if check := await db.ad_link_check(callback_data.id):
+        await db.update_check(check["id"], photo=None)
+    callback_answer.text = "↩️ Картинка подарка"
     await show(call, *await card_screen(db, settings, config, checks, bot_username, callback_data.id))
