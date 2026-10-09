@@ -77,7 +77,12 @@ class CheckService:
         return _get(check, "gift_price") or self.settings.get_int("gift_price")
 
     def caption(self, check: Row | dict) -> str:
-        template = esc(check["caption"]) if check["caption"] else self.settings.get("check_caption")
+        if not check["caption"]:
+            template = self.settings.get("check_caption")
+        elif _get(check, "caption_html"):  # рекламный чек: свой текст с форматированием
+            template = check["caption"]
+        else:
+            template = esc(check["caption"])
         text = render_template(template, gift=self.emoji(check), count=check["total"])
         if _get(check, "password"):
             text += "\n\n🔐 <b>Чек с паролем</b> — после перехода бот попросит его ввести."
@@ -100,18 +105,22 @@ class CheckService:
             await self.db.cleanup_check_drafts()
         return await self._create(admin_id, total, caption, with_photo, gift, password)
 
-    async def create_ad_check(self, admin_id: int, total: int, gift: Gift, ad_link_id: int) -> Row:
-        """Рекламный чек: сразу «отправлен» (виден в списке), переходы по нему идут в статистику ссылки."""
+    async def create_ad_check(self, admin_id: int, total: int, gift: Gift, ad_link_id: int,
+                              caption_html: str | None = None, password: str | None = None) -> Row:
+        """Рекламный чек: сразу «отправлен» (виден в списке), переходы по нему идут в статистику ссылки.
+        Свой текст — HTML с форматированием."""
         with_photo = bool(self.settings.get("check_photo") or await self.db.get_gift_banner(gift.id))
-        return await self._create(admin_id, total, None, with_photo, gift, None, ad_link_id)
+        return await self._create(admin_id, total, caption_html, with_photo, gift, password, ad_link_id,
+                                  caption_html=caption_html is not None)
 
     async def _create(self, admin_id: int, total: int, caption: str | None, with_photo: bool, gift: Gift,
-                      password: str | None, ad_link_id: int | None = None) -> Row:
+                      password: str | None, ad_link_id: int | None = None, caption_html: bool = False) -> Row:
         code = random_code()
         while await self.db.get_check_by_code(code):
             code = random_code()
         check_id = await self.db.create_check(code, total, caption, with_photo, admin_id,
-                                              gift.id, gift_emoji(gift), gift.star_count, password, ad_link_id)
+                                              gift.id, gift_emoji(gift), gift.star_count, password, ad_link_id,
+                                              caption_html)
         check = await self.db.get_check(check_id)
         assert check is not None
         return check

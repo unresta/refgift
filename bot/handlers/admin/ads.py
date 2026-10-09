@@ -16,10 +16,10 @@ from bot.handlers.admin.common import Btn, Input, back, btn, drop_prompt, kb, pa
 from bot.handlers.admin.checks import send_preview, status_icon
 from bot.handlers.admin.home import day_start, export_csv, star_balance
 from bot.handlers.user import AD_PREFIX
-from bot.services.checks import MAX_ACTIVATIONS, CheckService
+from bot.services.checks import MAX_ACTIVATIONS, PASSWORD_MAX, CheckService
 from bot.services.gifts import GiftImages, gift_emoji
 from bot.settings import Settings
-from bot.utils import esc, fmt_dt, fmt_num, percent, progress_bar, show
+from bot.utils import esc, fmt_dt, fmt_num, percent, progress_bar, render_template, show
 
 router = Router(name="admin_ads")
 
@@ -27,6 +27,7 @@ PER_PAGE = 8
 PERIODS = (7, 14, 30)
 CODE_RE = re.compile(r"^[A-Za-z0-9_-]{2,32}$")
 KEEP = {"keep_state": True}
+MAX_CHECK_TEXT = 900  # подпись под картинкой — до 1024 символов, с запасом на пометку о пароле
 
 
 def ad_url(bot_username: str, code: str) -> str:
@@ -140,6 +141,8 @@ async def card_screen(db: Database, settings: Settings, config: Config, checks: 
             f"Активации: <b>{fmt_num(check['used'])} / {fmt_num(check['total'])}</b> · "
             f"осталось {fmt_num(check['total'] - check['used'])}",
             f"{progress_bar(check['used'], check['total'])} {percent(check['used'], check['total'])}%",
+            f"💬 Текст: {'свой' if check['caption'] else 'стандартный'} · "
+            + (f"🔐 пароль <code>{esc(check['password'])}</code>" if check["password"] else "🔓 без пароля"),
             f"🆕 Новых через чек: <b>{fmt_num(cst['new_users'])}</b>",
             f"🎁 Подарки: ✅ {cst['sent']} · ⏳ {cst['pending']} · ❌ {cst['rejected']} · "
             f"потрачено <b>{fmt_num(cst['sent'] * price)}</b> ⭐",
@@ -187,6 +190,7 @@ async def card_screen(db: Database, settings: Settings, config: Config, checks: 
          btn("🔄 Обновить", "lk", "card", id=lid, p=period)],
         [Btn(text="📤 Отправить пост", switch_inline_query=f"#{check['code']}"),
          btn("👁 Пост с чеком", "lk", "cpost", id=lid)] if check else [],
+        [btn("💬 Текст чека", "lk", "ctext", id=lid), btn("🔐 Пароль", "lk", "cpw", id=lid)] if check else [],
         [btn("🎟 Открыть чек", "ck", "card", id=check["id"])] if check
         else [btn("🎟 Добавить чек на подарки", "lk", "cadd", id=lid, style="primary")],
         periods,
@@ -361,6 +365,10 @@ async def on_cost(message: Message, state: FSMContext, db: Database, settings: S
 POST_HINT = ("👆 <b>Готовый пост с чеком</b> — перешлите его рекламщику или в канал (кнопка сохранится), "
              "либо отправьте в любой чат кнопкой «📤 Отправить пост».\n\n"
              "Переходы по чеку, новые пользователи, подписки и активации — в статистике рекламы.")
+TEXT_HINT = ("Форматирование (жирный, курсив, ссылки, спойлеры, премиум-эмодзи) сохранится.\n"
+             "Переменные: <code>{gift}</code> — эмодзи подарка, <code>{count}</code> — число активаций.")
+PASSWORD_HINT = ("В тексте поста пароля не будет — укажите его сами, например в рекламном посте или в комментариях. "
+                 "Пользователь введёт его в боте; регистр не важен, 5 ошибок — пауза 10 минут.")
 
 
 async def post_photo(check, db: Database, settings: Settings, gift_images: GiftImages) -> str | None:
@@ -377,10 +385,24 @@ def cancel_check(data: dict) -> list[Btn]:
     return back("lk", text="✖️ Отмена")
 
 
+def step(data: dict, n: int) -> str:
+    """«шаг n из N»: у новой рекламы первый шаг — название, у существующей его нет."""
+    total = 5
+    if data.get("link_id"):
+        n, total = n - 1, total - 1
+    return f"шаг {n} из {total}"
+
+
+def check_text_error(plain: str) -> str | None:
+    if len(plain) > MAX_CHECK_TEXT:
+        return f"⚠️ Слишком длинно: {len(plain)}/{MAX_CHECK_TEXT} символов — это подпись под картинкой"
+    return None
+
+
 @router.callback_query(A.filter((F.s == "lk") & (F.a == "cnew")))
 async def cb_check_new(call: CallbackQuery, state: FSMContext) -> None:
     await prompt(call, state, Input.adc_name,
-                 "🎟 <b>Рекламный чек — шаг 1 из 3</b>\n\n"
+                 f"🎟 <b>Рекламный чек — {step({}, 1)}</b>\n\n"
                  "Пост с чеком на подарки для рекламы: бот посчитает переходы, новых пользователей, подписки, "
                  "активации и потраченные звёзды.\n\n"
                  "Как назвать рекламу? Название видите только вы.\n"
@@ -394,7 +416,7 @@ async def cb_check_add(call: CallbackQuery, callback_data: A, state: FSMContext,
     if not link:
         return
     await prompt(call, state, Input.adc_total,
-                 f"🎟 <b>Чек для «{esc(link['name'])}»</b>\n\n"
+                 f"🎟 <b>Чек для «{esc(link['name'])}» — {step({'link_id': link['id']}, 2)}</b>\n\n"
                  "Сколько подарков в чеке? Пришлите число активаций, например <code>100</code>.",
                  back("lk", "card", "✖️ Отмена", id=link["id"]), link_id=link["id"])
 
@@ -407,7 +429,7 @@ async def on_check_name(message: Message, state: FSMContext) -> None:
         return
     await drop_prompt(message, state)
     await state.set_state(Input.adc_total)
-    msg = await message.answer("🎟 <b>Шаг 2 из 3 — сколько подарков?</b>\n\n"
+    msg = await message.answer(f"🎟 <b>{step({}, 2).capitalize()} — сколько подарков?</b>\n\n"
                                "Пришлите число активаций чека, например <code>100</code>. "
                                "Каждый человек активирует чек один раз.",
                                reply_markup=kb(back("lk", text="✖️ Отмена")))
@@ -415,31 +437,91 @@ async def on_check_name(message: Message, state: FSMContext) -> None:
 
 
 @router.message(Input.adc_total, F.text)
-async def on_check_total(message: Message, state: FSMContext, bot: Bot, settings: Settings,
-                         gift_images: GiftImages) -> None:
+async def on_check_total(message: Message, state: FSMContext, settings: Settings) -> None:
     raw = message.text.strip().replace(" ", "")
     if not raw.isdigit() or not 1 <= int(raw) <= MAX_ACTIVATIONS:
         await message.answer(f"⚠️ Пришлите число от 1 до {fmt_num(MAX_ACTIVATIONS)}")
         return
-    total = int(raw)
     data = await drop_prompt(message, state)
+    await state.set_state(Input.adc_text)
+    msg = await message.answer(
+        f"💬 <b>{step(data, 3).capitalize()} — текст чека</b>\n\n"
+        "Пришлите текст, который будет в посте над кнопкой «Забрать».\n" + TEXT_HINT + "\n\n"
+        "Сейчас стандартный текст (меняется в «Тексты → Подпись чека»):\n"
+        f"<blockquote>{render_template(settings.get('check_caption'), gift=settings.get('gift_emoji'), count=raw)}"
+        "</blockquote>",
+        reply_markup=kb([btn("⏭ Оставить стандартный", "lk", "ctext_skip", style="primary")], cancel_check(data)),
+    )
+    await state.update_data(total=int(raw), prompt_id=msg.message_id)
+
+
+async def ask_password(event: Message | CallbackQuery, state: FSMContext, data: dict) -> None:
+    await state.set_state(Input.adc_password)
+    msg = await show(event, f"🔐 <b>{step(data, 4).capitalize()} — пароль</b>\n\n"
+                            "Пришлите пароль, если чек должен работать только с ним (до "
+                            f"{PASSWORD_MAX} символов), или создайте чек без пароля.\n\n" + PASSWORD_HINT,
+                     kb([btn("🔓 Без пароля", "lk", "cpw_skip", style="primary")], cancel_check(data)))
+    await state.update_data(prompt_id=msg.message_id if msg else None)
+
+
+@router.message(Input.adc_text, F.text)
+async def on_check_text(message: Message, state: FSMContext) -> None:
+    if error := check_text_error(message.text):
+        await message.answer(error)
+        return
+    data = await drop_prompt(message, state)
+    await state.update_data(caption=message.html_text)
+    await ask_password(message, state, data)
+
+
+@router.callback_query(A.filter((F.s == "lk") & (F.a == "ctext_skip")), Input.adc_text, flags=KEEP)
+async def cb_check_text_skip(call: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(caption=None)
+    await ask_password(call, state, await state.get_data())
+
+
+async def ask_gift(event: Message | CallbackQuery, state: FSMContext, bot: Bot, settings: Settings,
+                   gift_images: GiftImages) -> None:
+    data = await state.get_data()
+    total = data["total"]
     default_id = settings.get("gift_id")
     gifts = sorted(await gift_images.catalog.gifts(), key=lambda g: (g.id != default_id, g.star_count))
     if not gifts:
-        await message.answer("⚠️ Не удалось загрузить подарки — попробуйте ещё раз")
+        await show(event, "⚠️ Не удалось загрузить подарки — попробуйте ещё раз", kb(cancel_check(data)))
         return
     balance = await star_balance(bot)
     await state.set_state(Input.adc_gift)
     rows = [[btn(f"{gift_emoji(g)} {g.star_count} ⭐ × {fmt_num(total)} = {fmt_num(g.star_count * total)} ⭐",
                  "lk", "cgift", v=g.id, style="primary" if g.id == default_id else None)] for g in gifts[:30]]
-    text = (f"🎁 <b>Шаг 3 из 3 — какой подарок?</b>\n\n"
-            f"Чек на <b>{fmt_num(total)}</b> активаций. Звёзды списываются при каждой активации, а не сразу.")
+    text = (f"🎁 <b>{step(data, 5).capitalize()} — какой подарок?</b>\n\n"
+            f"Чек на <b>{fmt_num(total)}</b> активаций"
+            + (f" · 🔐 пароль <code>{esc(data['password'])}</code>" if data.get("password") else "")
+            + ". Звёзды списываются при каждой активации, а не сразу.")
     if balance is not None:
         text += f"\n⭐ Баланс бота: <b>{fmt_num(balance)}</b>"
         if settings.get("reward_mode") == "auto" and balance < gifts[0].star_count * total:
             text += " — на весь чек может не хватить, остальное уйдёт в заявки"
-    msg = await message.answer(text, reply_markup=kb(*rows, cancel_check(data)))
-    await state.update_data(total=total, prompt_id=msg.message_id)
+    msg = await show(event, text, kb(*rows, cancel_check(data)))
+    await state.update_data(prompt_id=msg.message_id if msg else None)
+
+
+@router.message(Input.adc_password, F.text)
+async def on_check_password(message: Message, state: FSMContext, bot: Bot, settings: Settings,
+                            gift_images: GiftImages) -> None:
+    password = message.text.strip()
+    if not 1 <= len(password) <= PASSWORD_MAX:
+        await message.answer(f"⚠️ Пароль — от 1 до {PASSWORD_MAX} символов")
+        return
+    await drop_prompt(message, state)
+    await state.update_data(password=password)
+    await ask_gift(message, state, bot, settings, gift_images)
+
+
+@router.callback_query(A.filter((F.s == "lk") & (F.a == "cpw_skip")), Input.adc_password, flags=KEEP)
+async def cb_check_password_skip(call: CallbackQuery, state: FSMContext, bot: Bot, settings: Settings,
+                                 gift_images: GiftImages) -> None:
+    await state.update_data(password=None)
+    await ask_gift(call, state, bot, settings, gift_images)
 
 
 @router.callback_query(A.filter((F.s == "lk") & (F.a == "cgift")), Input.adc_gift, flags=KEEP)
@@ -453,15 +535,24 @@ async def cb_check_gift(call: CallbackQuery, callback_data: A, callback_answer: 
     data = await state.get_data()
     await state.clear()
     link_id = data.get("link_id") or await db.create_ad_link(await free_code(db), data["name"], call.from_user.id)
-    check = await checks.create_ad_check(call.from_user.id, data["total"], gift, link_id)
+    check = await checks.create_ad_check(call.from_user.id, data["total"], gift, link_id,
+                                         data.get("caption"), data.get("password"))
     callback_answer.text = "✅ Рекламный чек создан"
     try:
         await call.message.delete()
     except TelegramBadRequest:
         pass
-    await send_preview(call.message, checks, await post_photo(check, db, settings, gift_images), check)
-    await call.message.answer(POST_HINT)
+    await send_post(call.message, check, db, settings, checks, gift_images)
     await show(call.message, *await card_screen(db, settings, config, checks, bot_username, link_id))
+
+
+async def send_post(message: Message, check, db: Database, settings: Settings, checks: CheckService,
+                    gift_images: GiftImages, markup=None) -> None:
+    await send_preview(message, checks, await post_photo(check, db, settings, gift_images), check)
+    hint = POST_HINT
+    if check["password"]:
+        hint += f"\n\n🔐 Пароль: <code>{esc(check['password'])}</code> — не забудьте указать его в рекламе."
+    await message.answer(hint, reply_markup=markup)
 
 
 @router.callback_query(A.filter((F.s == "lk") & (F.a == "cpost")))
@@ -470,5 +561,87 @@ async def cb_check_post(call: CallbackQuery, callback_data: A, db: Database, set
     check = await db.ad_link_check(callback_data.id)
     if not check:
         return
-    await send_preview(call.message, checks, await post_photo(check, db, settings, gift_images), check)
-    await call.message.answer(POST_HINT, reply_markup=kb(back("lk", "card", "« К статистике", id=callback_data.id)))
+    await send_post(call.message, check, db, settings, checks, gift_images,
+                    kb(back("lk", "card", "« К статистике", id=callback_data.id)))
+
+
+# ---------- рекламный чек: изменить текст и пароль ----------
+
+@router.callback_query(A.filter((F.s == "lk") & (F.a == "ctext")))
+async def cb_check_text_edit(call: CallbackQuery, callback_data: A, state: FSMContext, db: Database,
+                             checks: CheckService) -> None:
+    check = await db.ad_link_check(callback_data.id)
+    if not check:
+        return
+    rows = [back("lk", "card", "✖️ Отмена", id=callback_data.id)]
+    if check["caption"]:
+        rows.insert(0, [btn("↩️ Вернуть стандартный", "lk", "ctext_reset", id=callback_data.id)])
+    await state.set_state(Input.adc_edit_text)
+    msg = await show(call, "💬 <b>Новый текст чека</b>\n\n" + TEXT_HINT + "\n\n"
+                           f"Сейчас:\n<blockquote>{checks.caption(check)}</blockquote>\n\n"
+                           "<i>Уже опубликованные посты не изменятся — после правки возьмите новый пост "
+                           "«👁 Пост с чеком».</i>", kb(*rows))
+    await state.update_data(prompt_id=msg.message_id if msg else None, link_id=callback_data.id)
+
+
+@router.message(Input.adc_edit_text, F.text)
+async def on_check_text_edit(message: Message, state: FSMContext, db: Database, settings: Settings, config: Config,
+                             checks: CheckService, bot_username: str) -> None:
+    if error := check_text_error(message.text):
+        await message.answer(error)
+        return
+    data = await drop_prompt(message, state)
+    await state.clear()
+    if check := await db.ad_link_check(data["link_id"]):
+        await db.update_check(check["id"], caption=message.html_text, caption_html=1)
+    await message.answer("✅ Текст чека сохранён")
+    await show(message, *await card_screen(db, settings, config, checks, bot_username, data["link_id"]))
+
+
+@router.callback_query(A.filter((F.s == "lk") & (F.a == "ctext_reset")))
+async def cb_check_text_reset(call: CallbackQuery, callback_data: A, callback_answer: CallbackAnswer, db: Database,
+                              settings: Settings, config: Config, checks: CheckService, bot_username: str) -> None:
+    if check := await db.ad_link_check(callback_data.id):
+        await db.update_check(check["id"], caption=None, caption_html=0)
+    callback_answer.text = "↩️ Стандартный текст"
+    await show(call, *await card_screen(db, settings, config, checks, bot_username, callback_data.id))
+
+
+@router.callback_query(A.filter((F.s == "lk") & (F.a == "cpw")))
+async def cb_check_password_edit(call: CallbackQuery, callback_data: A, state: FSMContext, db: Database) -> None:
+    check = await db.ad_link_check(callback_data.id)
+    if not check:
+        return
+    rows = [back("lk", "card", "✖️ Отмена", id=callback_data.id)]
+    if check["password"]:
+        rows.insert(0, [btn("🔓 Убрать пароль", "lk", "cpw_off", id=callback_data.id, style="danger")])
+    await state.set_state(Input.adc_edit_password)
+    current = f"<code>{esc(check['password'])}</code>" if check["password"] else "нет"
+    msg = await show(call, f"🔐 <b>Пароль чека</b> — сейчас {current}\n\n"
+                           f"Пришлите новый пароль (до {PASSWORD_MAX} символов). Применится сразу.\n\n"
+                           + PASSWORD_HINT, kb(*rows))
+    await state.update_data(prompt_id=msg.message_id if msg else None, link_id=callback_data.id)
+
+
+@router.message(Input.adc_edit_password, F.text)
+async def on_check_password_edit(message: Message, state: FSMContext, db: Database, settings: Settings,
+                                 config: Config, checks: CheckService, bot_username: str) -> None:
+    password = message.text.strip()
+    if not 1 <= len(password) <= PASSWORD_MAX:
+        await message.answer(f"⚠️ Пароль — от 1 до {PASSWORD_MAX} символов")
+        return
+    data = await drop_prompt(message, state)
+    await state.clear()
+    if check := await db.ad_link_check(data["link_id"]):
+        await db.update_check(check["id"], password=password)
+    await message.answer("✅ Пароль сохранён")
+    await show(message, *await card_screen(db, settings, config, checks, bot_username, data["link_id"]))
+
+
+@router.callback_query(A.filter((F.s == "lk") & (F.a == "cpw_off")))
+async def cb_check_password_off(call: CallbackQuery, callback_data: A, callback_answer: CallbackAnswer, db: Database,
+                                settings: Settings, config: Config, checks: CheckService, bot_username: str) -> None:
+    if check := await db.ad_link_check(callback_data.id):
+        await db.update_check(check["id"], password=None)
+    callback_answer.text = "🔓 Пароль убран — чек работает без него"
+    await show(call, *await card_screen(db, settings, config, checks, bot_username, callback_data.id))

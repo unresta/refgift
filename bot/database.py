@@ -310,6 +310,7 @@ MIGRATIONS = [
     ("checks", "password", "TEXT"),         # пароль чека (NULL — без пароля)
     ("users", "balance", "INTEGER NOT NULL DEFAULT 0"),  # звёзды в боте, сотые доли
     ("checks", "ad_link_id", "INTEGER"),    # рекламный чек: переходы по нему считаются в рекламной ссылке
+    ("checks", "caption_html", "INTEGER NOT NULL DEFAULT 0"),  # подпись — HTML (с форматированием), не текст
 ]
 POST_MIGRATION_SQL = """
 CREATE INDEX IF NOT EXISTS idx_users_ad_link ON users(ad_link_id, created_at);
@@ -770,12 +771,13 @@ class Database:
     # ---------- чеки ----------
     async def create_check(self, code: str, total: int, caption: str | None, with_photo: bool,
                            created_by: int, gift_id: str, gift_emoji: str, gift_price: int,
-                           password: str | None = None, ad_link_id: int | None = None) -> int:
+                           password: str | None = None, ad_link_id: int | None = None,
+                           caption_html: bool = False) -> int:
         cur = await self.conn.execute(
             "INSERT INTO checks (code, total, caption, with_photo, created_by, created_at, gift_id, gift_emoji, "
-            "gift_price, password, ad_link_id, is_sent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "gift_price, password, ad_link_id, is_sent, caption_html) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (code, total, caption, int(with_photo), created_by, now(), gift_id, gift_emoji, gift_price, password,
-             ad_link_id, int(ad_link_id is not None)),
+             ad_link_id, int(ad_link_id is not None), int(caption_html)),
         )
         await self.conn.commit()
         return cur.lastrowid or 0
@@ -838,6 +840,12 @@ class Database:
             "UPDATE checks SET is_sent = 1, inline_message_id = COALESCE(?, inline_message_id) WHERE id = ?",
             inline_message_id, check_id,
         )
+
+    async def update_check(self, check_id: int, **fields: Any) -> None:
+        allowed = {"caption", "caption_html", "password"}
+        assert set(fields) <= allowed, fields
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        await self.run(f"UPDATE checks SET {sets} WHERE id = ?", *fields.values(), check_id)
 
     async def set_check_active(self, check_id: int, active: bool) -> None:
         await self.run("UPDATE checks SET is_active = ? WHERE id = ?", int(active), check_id)

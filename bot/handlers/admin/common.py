@@ -58,7 +58,11 @@ class Input(StatesGroup):
     ad_cost = State()
     adc_name = State()   # рекламный чек: название
     adc_total = State()  # …число активаций
+    adc_text = State()   # …свой текст
+    adc_password = State()  # …пароль
     adc_gift = State()   # …выбор подарка
+    adc_edit_text = State()
+    adc_edit_password = State()
     check_photo = State()
     gift_banner = State()
     remind_interval = State()
