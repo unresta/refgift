@@ -1268,6 +1268,21 @@ async def scenario(dp, db, bot, session) -> None:
     check((await db.get_check(ad_check["id"]))["caption"] is None and "Текст: стандартный" in session.screen().text,
           "возврат к стандартному тексту")
 
+    await feed(inline_update(530, f"#{ad_check['code']}"))
+    shared = session.by_type(AnswerInlineQuery)[-1].results
+    check(len(shared) == 1 and f"c_{ad_check['code']}" in str(shared[0].reply_markup)
+          and "Зима" not in shared[0].description + shared[0].title and "⭐" not in shared[0].description,
+          "не-админ отправляет чек через #код — без пароля и баланса")
+    draft = await db.get_check(await db.create_check("draftcode", 5, None, False, ADMIN, "g_bear", "🧸", 15))
+    await feed(inline_update(530, f"#{draft['code']}"))
+    check(not session.by_type(AnswerInlineQuery)[-1].results, "черновик админа не-админу не виден")
+    await feed(inline_update(530, "#nope"))
+    check("не найден" in session.by_type(AnswerInlineQuery)[-1].button.text, "неизвестный код — «не найден»")
+    await db.set_check_active(ad_check["id"], False)
+    await feed(inline_update(530, f"#{ad_check['code']}"))
+    check("закончился" in session.by_type(AnswerInlineQuery)[-1].button.text, "выключенный чек не-админ не отправит")
+    await db.set_check_active(ad_check["id"], True)
+
     await feed(cb_update(ADMIN, A(s="lk", a="cphoto", id=ad_link["id"]).pack()))
     await feed(msg_update(ADMIN, None, photo=[{"file_id": "ad_photo", "file_unique_id": "ap",
                                                "width": 1280, "height": 720}]))

@@ -34,9 +34,14 @@ def split_password(text: str) -> tuple[str, str | None]:
 
 
 async def check_result(check: Row, checks: CheckService, settings: Settings, images: GiftImages,
-                       balance: int | None, gift: Gift | None = None, is_default: bool = False):
+                       balance: int | None, gift: Gift | None = None, is_default: bool = False,
+                       for_admin: bool = True):
     total, left = check["total"], check["total"] - check["used"]
     emoji, price = checks.emoji(check), checks.price(check)
+    if not for_admin:  # пользователь пересылает чужой чек: без пароля, цены и баланса бота
+        title = f"🎁 Чек на {emoji} · осталось {fmt_num(left)} из {fmt_num(total)}"
+        return await _check_result(check, checks, settings, images, gift, title,
+                                   "Нажмите, чтобы отправить чек в этот чат")
     need = left * price
     title = f"{emoji} {price}⭐ × {fmt_num(total)}" + (" · по умолчанию" if is_default else "")
     if check["used"]:
@@ -49,7 +54,11 @@ async def check_result(check: Row, checks: CheckService, settings: Settings, ima
         if settings.get("reward_mode") == "auto" and balance < need:
             description += " ⚠️ не хватит — часть уйдёт в заявки"
     description += "\nНажмите, чтобы отправить чек в этот чат"
+    return await _check_result(check, checks, settings, images, gift, title, description)
 
+
+async def _check_result(check: Row, checks: CheckService, settings: Settings, images: GiftImages,
+                        gift: Gift | None, title: str, description: str):
     common = dict(id=f"{RESULT_PREFIX}{check['id']}", title=title, description=description,
                   reply_markup=checks.keyboard(check))
     gift = gift or await images.catalog.get(check["gift_id"] or "")
@@ -72,22 +81,19 @@ def hint(text: str) -> InlineQueryResultsButton:
 @router.inline_query()
 async def on_inline(query: InlineQuery, bot: Bot, db: Database, settings: Settings, admins: AdminRegistry,
                     checks: CheckService, gift_images: GiftImages, bot_username: str) -> None:
-    if not admins.is_admin(query.from_user.id):
+    text = query.query.strip()
+    is_admin = admins.is_admin(query.from_user.id)
+
+    # @bot #code — отправить существующий чек (может любой, кто знает код)
+    if text.startswith("#"):
+        await share_check(query, text[1:].strip(), is_admin, bot, db, settings, checks, gift_images)
+        return
+
+    if not is_admin:
         await user_inline(query, db, settings, bot_username)
         return
 
-    text = query.query.strip()
     balance = await star_balance(bot)
-
-    # @bot #code — повторно отправить существующий чек
-    if text.startswith("#"):
-        check = await db.get_check_by_code(text[1:].strip())
-        if not check:
-            await query.answer([], cache_time=0, is_personal=True, button=hint("❓ Чек не найден"))
-            return
-        result = await check_result(check, checks, settings, gift_images, balance)
-        await query.answer([result], cache_time=0, is_personal=True)
-        return
 
     parts = text.split(maxsplit=1)
     if not parts or not parts[0].isdigit():
@@ -117,6 +123,21 @@ async def on_inline(query: InlineQuery, bot: Bot, db: Database, settings: Settin
     await query.answer(results, cache_time=0, is_personal=True,
                        button=hint(f"🎟 Чек на {fmt_num(total)} активаций"
                                    + (f" · 🔐 пароль: {password}" if password else "") + " — выберите подарок"))
+
+
+async def share_check(query: InlineQuery, code: str, is_admin: bool, bot: Bot, db: Database, settings: Settings,
+                      checks: CheckService, gift_images: GiftImages) -> None:
+    check = await db.get_check_by_code(code) if code else None
+    # черновики (ещё не отправленные админом чеки) видны только админам
+    if not check or not (is_admin or check["is_sent"] or check["used"]):
+        await query.answer([], cache_time=0, is_personal=True, button=hint("❓ Чек не найден"))
+        return
+    if not is_admin and (not check["is_active"] or check["used"] >= check["total"]):
+        await query.answer([], cache_time=0, is_personal=True, button=hint("⚪️ Этот чек уже закончился"))
+        return
+    balance = await star_balance(bot) if is_admin else None
+    result = await check_result(check, checks, settings, gift_images, balance, for_admin=is_admin)
+    await query.answer([result], cache_time=0, is_personal=True)
 
 
 async def user_inline(query: InlineQuery, db: Database, settings: Settings, bot_username: str) -> None:
